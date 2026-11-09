@@ -1,0 +1,81 @@
+#include "synthmatch/Render.h"
+
+#include "synthmatch/Engine.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+
+namespace synthmatch {
+
+namespace {
+
+struct TimedEvent {
+    std::int64_t sample;
+    bool isNoteOn;
+    int note;
+    float velocity;
+};
+
+} // namespace
+
+StereoBuffer render(const ParamValues& params, std::span<const NoteEvent> notes, const RenderSettings& settings)
+{
+    const double sampleRate = settings.sampleRate > 0.0 ? settings.sampleRate : 48000.0;
+    const int blockSize = std::max(1, settings.blockSize);
+
+    Engine engine;
+    engine.prepare(sampleRate);
+    engine.setParams(params);
+
+    std::vector<TimedEvent> events;
+    events.reserve(notes.size() * 2);
+    std::int64_t lastOff = 0;
+
+    for (const auto& n : notes) {
+        const auto on = std::llround(std::max(0.0, n.startSec) * sampleRate);
+        // At least one sample long so a note-off never lands on its own note-on.
+        const auto off = std::max(on + 1, std::llround(std::max(0.0, n.startSec + n.durationSec) * sampleRate));
+        events.push_back({on, true, n.note, n.velocity});
+        events.push_back({off, false, n.note, 0.0f});
+        lastOff = std::max(lastOff, off);
+    }
+
+    // Note-offs before note-ons at the same sample, so a repeated note retriggers.
+    std::stable_sort(events.begin(), events.end(), [](const TimedEvent& a, const TimedEvent& b) {
+        if (a.sample != b.sample)
+            return a.sample < b.sample;
+        return !a.isNoteOn && b.isNoteOn;
+    });
+
+    const auto total = lastOff + std::llround(std::max(0.0, settings.tailSec) * sampleRate);
+
+    StereoBuffer out;
+    out.sampleRate = sampleRate;
+    out.left.assign(static_cast<std::size_t>(total), 0.0f);
+    out.right.assign(static_cast<std::size_t>(total), 0.0f);
+
+    std::int64_t pos = 0;
+    std::size_t next = 0;
+
+    while (pos < total) {
+        while (next < events.size() && events[next].sample <= pos) {
+            const auto& e = events[next++];
+            if (e.isNoteOn)
+                engine.noteOn(e.note, e.velocity);
+            else
+                engine.noteOff(e.note);
+        }
+
+        auto end = std::min(total, pos + blockSize);
+        if (next < events.size())
+            end = std::min(end, events[next].sample);
+
+        engine.process(out.left.data() + pos, out.right.data() + pos, static_cast<int>(end - pos));
+        pos = end;
+    }
+
+    return out;
+}
+
+} // namespace synthmatch

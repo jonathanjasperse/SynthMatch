@@ -1,0 +1,52 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  plugin:
+    name: Plugin (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: SynthMatch-${{ runner.os }}
+          path: |
+            build/plugin/SynthMatch_artefacts/Release/VST3
+            build/plugin/SynthMatch_artefacts/Release/AU
+          if-no-files-found: warn
+
+  # The engine has no JUCE dependency, so it also builds on Linux, where the
+  # dataset generation and training will eventually run.
+  engine-linux:
+    name: Engine (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSYNTHMATCH_BUILD_PLUGIN=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
