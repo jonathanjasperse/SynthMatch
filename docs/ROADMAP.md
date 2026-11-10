@@ -27,7 +27,7 @@ Windows, macOS and Linux (engine only on Linux).
 Done when:
 - [x] the engine, CLI and tests build and pass on Windows
 - [ ] the plugin loads and plays in a DAW on Windows
-- [ ] CI passes on macOS (needs the repo on GitHub)
+- [x] CI passes on Windows, macOS and Ubuntu (2026-11-09, commit 72d750d)
 
 ### Stage 1: Engine core
 3 oscillators (saw, square, triangle, sine, noise, with detune and unison),
