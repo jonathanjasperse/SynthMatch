@@ -42,6 +42,12 @@ The first configure takes a few minutes while JUCE downloads and builds its
 helper tool. To build only the engine, CLI and tests without JUCE, add
 `-DSYNTHMATCH_BUILD_PLUGIN=OFF`.
 
+To have every build copy the plugin into your per-user plugin folder (no admin
+rights needed), configure with `-DSYNTHMATCH_INSTALL_PLUGIN=ON`. On Windows the
+VST3 goes to `%LOCALAPPDATA%\Programs\Common\VST3`; on macOS it goes to
+`~/Library/Audio/Plug-Ins`. If your DAW doesn't scan that Windows folder by
+default, add it to the DAW's VST3 paths once.
+
 Built plugins end up in `build/plugin/SynthMatch_artefacts/Release/`:
 
 | Format | Path | Install to |

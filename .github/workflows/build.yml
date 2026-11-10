@@ -3,7 +3,16 @@ name: Build
 on:
   push:
     branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+
+# A newer push cancels the run for the older one. macOS minutes are billed at
+# 10x on private repos, so don't spend them on outdated commits.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   plugin:
