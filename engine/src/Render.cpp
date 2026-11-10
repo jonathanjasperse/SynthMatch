@@ -17,6 +17,13 @@ struct TimedEvent {
     float velocity;
 };
 
+// std::llround returns long long, which is not the same type as std::int64_t
+// on Linux, so convert once here.
+std::int64_t toSamples(double seconds, double sampleRate)
+{
+    return static_cast<std::int64_t>(std::llround(std::max(0.0, seconds) * sampleRate));
+}
+
 } // namespace
 
 StereoBuffer render(const ParamValues& params, std::span<const NoteEvent> notes, const RenderSettings& settings)
@@ -33,9 +40,9 @@ StereoBuffer render(const ParamValues& params, std::span<const NoteEvent> notes,
     std::int64_t lastOff = 0;
 
     for (const auto& n : notes) {
-        const auto on = std::llround(std::max(0.0, n.startSec) * sampleRate);
+        const auto on = toSamples(n.startSec, sampleRate);
         // At least one sample long so a note-off never lands on its own note-on.
-        const auto off = std::max(on + 1, std::llround(std::max(0.0, n.startSec + n.durationSec) * sampleRate));
+        const auto off = std::max(on + 1, toSamples(n.startSec + n.durationSec, sampleRate));
         events.push_back({on, true, n.note, n.velocity});
         events.push_back({off, false, n.note, 0.0f});
         lastOff = std::max(lastOff, off);
@@ -48,7 +55,7 @@ StereoBuffer render(const ParamValues& params, std::span<const NoteEvent> notes,
         return !a.isNoteOn && b.isNoteOn;
     });
 
-    const auto total = lastOff + std::llround(std::max(0.0, settings.tailSec) * sampleRate);
+    const auto total = lastOff + toSamples(settings.tailSec, sampleRate);
 
     StereoBuffer out;
     out.sampleRate = sampleRate;
@@ -67,7 +74,7 @@ StereoBuffer render(const ParamValues& params, std::span<const NoteEvent> notes,
                 engine.noteOff(e.note);
         }
 
-        auto end = std::min(total, pos + blockSize);
+        auto end = std::min<std::int64_t>(total, pos + blockSize);
         if (next < events.size())
             end = std::min(end, events[next].sample);
 
