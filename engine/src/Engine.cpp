@@ -3,15 +3,24 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <numbers>
 
 namespace synthmatch {
 
 namespace {
 
-constexpr float kSilence = 1.0e-4f; // -80 dB: a releasing voice below this is freed
+// Oscillators stay below this fraction of the sample rate.
+constexpr double kMaxPhaseIncrement = 0.45;
 
 double noteToHz(int note) { return 440.0 * std::pow(2.0, (note - 69) / 12.0); }
+
+// xorshift32: a tiny deterministic random generator. Returns white noise in [-1, 1).
+double nextNoise(std::uint32_t& state)
+{
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return static_cast<double>(static_cast<std::int32_t>(state)) * (1.0 / 2147483648.0);
+}
 
 } // namespace
 
@@ -49,20 +58,29 @@ void Engine::setParams(const ParamValues& values)
 
 void Engine::updateDerived()
 {
-    gain_ = std::pow(10.0f, params_[param::GainDb] / 20.0f);
+    const auto p = [this](int index) { return static_cast<double>(params_[static_cast<std::size_t>(index)]); };
 
-    const double attackSamples = std::max(1.0, params_[param::AmpAttackMs] * 0.001 * sampleRate_);
-    attackStep_ = static_cast<float>(1.0 / attackSamples);
+    gain_ = static_cast<float>(std::pow(10.0, p(param::GainDb) / 20.0));
 
-    // Exponential decay that reaches -60 dB after the release time.
-    const double releaseSamples = std::max(1.0, params_[param::AmpReleaseMs] * 0.001 * sampleRate_);
-    releaseCoeff_ = static_cast<float>(std::exp(std::log(0.001) / releaseSamples));
+    ampEnv_ = dsp::AdsrCoeffs::make(sampleRate_, p(param::AmpAttackMs), p(param::AmpDecayMs), p(param::AmpSustain),
+                                    p(param::AmpReleaseMs));
+
+    for (int k = 0; k < param::kNumOscs; ++k) {
+        auto& o = oscs_[static_cast<std::size_t>(k)];
+        o.wave = static_cast<dsp::Wave>(static_cast<int>(p(param::osc(k, param::OscWave))));
+        o.level = p(param::osc(k, param::OscLevel));
+        const double semitones = p(param::osc(k, param::OscCoarse)) + p(param::osc(k, param::OscFine)) / 100.0;
+        o.pitchRatio = std::pow(2.0, semitones / 12.0);
+        o.pulseWidth = p(param::osc(k, param::OscPulseWidth));
+    }
+
+    noiseLevel_ = p(param::NoiseLevel);
 }
 
 Engine::Voice& Engine::allocateVoice()
 {
     for (auto& v : voices_)
-        if (v.stage == Stage::Idle)
+        if (!v.amp.active())
             return v;
 
     // No free voice: steal the oldest one.
@@ -80,26 +98,27 @@ void Engine::noteOn(int note, float velocity)
     }
 
     Voice& v = allocateVoice();
-    v.stage = Stage::Attack; // a stolen voice ramps up from its current level
+    v.amp.gateOn(); // a stolen voice ramps up from its current level
     v.note = note;
     v.velocity = std::min(velocity, 1.0f);
-    v.phase = 0.0;
-    v.increment = noteToHz(note) / sampleRate_;
+    v.baseHz = noteToHz(note);
+    v.phase.fill(0.0);
     v.startOrder = ++noteCounter_;
+    // A different noise sequence per note, but the same one every render.
+    v.noiseState = static_cast<std::uint32_t>(v.startOrder * 0x9E3779B9u) | 1u;
 }
 
 void Engine::noteOff(int note)
 {
     for (auto& v : voices_)
-        if (v.note == note && (v.stage == Stage::Attack || v.stage == Stage::Sustain))
-            v.stage = Stage::Release;
+        if (v.note == note && v.amp.stage != dsp::AdsrState::Stage::Release)
+            v.amp.gateOff();
 }
 
 void Engine::allNotesOff()
 {
     for (auto& v : voices_)
-        if (v.stage != Stage::Idle)
-            v.stage = Stage::Release;
+        v.amp.gateOff();
 }
 
 void Engine::allSoundOff() { voices_.fill(Voice{}); }
@@ -112,43 +131,37 @@ void Engine::process(float* left, float* right, int numSamples)
     std::fill_n(left, numSamples, 0.0f);
     std::fill_n(right, numSamples, 0.0f);
 
-    constexpr double twoPi = 2.0 * std::numbers::pi;
-
     for (auto& v : voices_) {
-        if (v.stage == Stage::Idle)
+        if (!v.amp.active())
             continue;
 
         const float amp = gain_ * v.velocity;
 
+        std::array<double, param::kNumOscs> increment{};
+        for (std::size_t k = 0; k < increment.size(); ++k)
+            increment[k] = std::min(kMaxPhaseIncrement, v.baseHz * oscs_[k].pitchRatio / sampleRate_);
+
         for (int i = 0; i < numSamples; ++i) {
-            switch (v.stage) {
-            case Stage::Attack:
-                v.env += attackStep_;
-                if (v.env >= 1.0f) {
-                    v.env = 1.0f;
-                    v.stage = Stage::Sustain;
-                }
+            const float env = dsp::adsrTick(v.amp, ampEnv_);
+            if (!v.amp.active())
                 break;
-            case Stage::Release:
-                v.env *= releaseCoeff_;
-                if (v.env < kSilence) {
-                    v.env = 0.0f;
-                    v.stage = Stage::Idle;
-                }
-                break;
-            case Stage::Sustain:
-            case Stage::Idle:
-                break;
+
+            double mix = 0.0;
+            for (std::size_t k = 0; k < oscs_.size(); ++k) {
+                const auto& o = oscs_[k];
+                if (o.level > 0.0)
+                    mix += o.level * dsp::oscSample(o.wave, v.phase[k], increment[k], o.pulseWidth);
+
+                // Silent oscillators keep running so their phase stays in step.
+                v.phase[k] += increment[k];
+                if (v.phase[k] >= 1.0)
+                    v.phase[k] -= 1.0;
             }
 
-            if (v.stage == Stage::Idle)
-                break;
+            if (noiseLevel_ > 0.0)
+                mix += noiseLevel_ * nextNoise(v.noiseState);
 
-            const float s = static_cast<float>(std::sin(twoPi * v.phase)) * v.env * amp;
-            v.phase += v.increment;
-            if (v.phase >= 1.0)
-                v.phase -= 1.0;
-
+            const float s = static_cast<float>(mix) * env * amp;
             left[i] += s;
             right[i] += s;
         }
@@ -157,8 +170,8 @@ void Engine::process(float* left, float* right, int numSamples)
 
 int Engine::activeVoiceCount() const
 {
-    return static_cast<int>(std::count_if(voices_.begin(), voices_.end(),
-                                          [](const Voice& v) { return v.stage != Stage::Idle; }));
+    return static_cast<int>(
+        std::count_if(voices_.begin(), voices_.end(), [](const Voice& v) { return v.amp.active(); }));
 }
 
 } // namespace synthmatch

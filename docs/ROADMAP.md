@@ -19,7 +19,7 @@ to them.
 
 ## Stages
 
-### Stage 0: Scaffold (current)
+### Stage 0: Scaffold
 CMake project, JUCE 9 plugin (VST3 + Standalone, plus AU on macOS), a sine-wave
 engine with an attack/release envelope, the render CLI, tests, and CI on
 Windows, macOS and Linux (engine only on Linux).
@@ -29,12 +29,23 @@ Done when:
 - [ ] the plugin loads and plays in a DAW on Windows
 - [x] CI passes on Windows, macOS and Ubuntu (2026-11-09, commit 72d750d)
 
-### Stage 1: Engine core
+### Stage 1: Engine core (current)
 3 oscillators (saw, square, triangle, sine, noise, with detune and unison),
 mixer, filter (state-variable / ZDF), amp and filter envelopes (ADSR), 2 LFOs,
 and polyphony. Oscillators must be band-limited (e.g. PolyBLEP).
 Done when: golden-render tests pass (render a fixed preset and compare it with a
 saved reference).
+
+Built in slices:
+- [x] **1a** Oscillators and amp envelope: 3 band-limited oscillators (sine,
+  triangle, saw, square with pulse width), coarse and fine tuning, mixer levels,
+  white noise, ADSR amp envelope, golden-render tests.
+- [ ] **1b** Filter: state-variable (ZDF) low-pass, band-pass and high-pass with
+  cutoff, resonance and key tracking, plus an ADSR filter envelope.
+- [ ] **1c** Modulation and width: 2 LFOs with assignable targets, unison with
+  detune and stereo spread, pitch bend.
+- [ ] **1d** Polish: parameter smoothing (no zipper noise), click-free voice
+  stealing, performance check with all 16 voices.
 
 ### Stage 2: Synth view and presets
 A real editor with knobs bound to the schema. Presets saved and loaded as JSON.
@@ -76,3 +87,22 @@ Hardware: nothing in this project needs CUDA.
 ### Stage 7: Track isolator
 Source separation (Demucs-class model through ONNX Runtime), run offline on a
 background thread, plus manual cleanup: region select, band-pass, mid/side solo.
+
+### Stage 8: Installers
+One command builds release installers into `dist/` (which is not committed):
+
+- **Windows:** `dist/SynthMatch-<version>-Windows.exe`, built with Inno Setup.
+  Installs the VST3 to `C:\Program Files\Common Files\VST3`, the Standalone
+  app, factory presets and the ONNX models, with an uninstaller.
+- **macOS:** `dist/SynthMatch-<version>-macOS.pkg`, built with `pkgbuild` and
+  `productbuild`. Installs the VST3 and AU as universal binaries (Apple Silicon
+  and Intel).
+- A `package` CMake target (or `scripts/package`) runs the Release build, then
+  the installer step. CI builds both installers and uploads them on a version
+  tag, since the macOS one can only be built on a Mac.
+- Before public release: code signing on Windows, and Developer ID signing plus
+  notarization on macOS (needs a paid Apple Developer account). Unsigned
+  installers work for testing but show security warnings.
+
+A basic unsigned installer can be added earlier, any time after Stage 2, so
+testers can install builds without copying files by hand.

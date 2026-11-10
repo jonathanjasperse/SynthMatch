@@ -3,9 +3,9 @@
 A synth plugin that listens to a reference recording of a synth and builds a
 preset that sounds like it. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
 
-**Status:** Stage 0. The plugin is a sine-wave synth with gain, attack and
-release, which proves out the build, the engine/plugin split and the offline
-renderer.
+**Status:** Stage 1a. The plugin is a 16-voice synth with 3 band-limited
+oscillators (sine, triangle, saw, square with pulse width), tuning, a mixer,
+white noise and an ADSR amp envelope. The filter, LFOs and unison come next.
 
 ## Layout
 
@@ -13,7 +13,7 @@ renderer.
 engine/        synth engine: plain C++20, no JUCE (parameters, voices, offline render, WAV)
 plugin/        JUCE plugin wrapper (VST3, Standalone, AU on macOS)
 tools/render/  synthmatch_render: render notes to a .wav without a DAW
-tests/         engine tests and CLI smoke tests (CTest)
+tests/         engine tests, golden renders and CLI smoke tests (CTest)
 docs/          roadmap
 ```
 
@@ -56,10 +56,20 @@ Built plugins end up in `build/plugin/SynthMatch_artefacts/Release/`:
 | AU (macOS) | `AU/SynthMatch.component` | `~/Library/Audio/Plug-Ins/Components` |
 | Standalone | `Standalone/` | Run directly |
 
+## Golden renders
+
+`tests/golden/` holds reference renders. The tests fail if the engine's output
+drifts from them. After an intentional change to the sound, regenerate them and
+commit the new files:
+
+```bash
+build/tests/Release/synthmatch_engine_tests --update-golden
+```
+
 ## Render from the command line
 
 ```bash
-build/tools/render/Release/synthmatch_render --note 60 --note 64 --note 67 --set amp_release_ms=400 --out chord.wav
+build/tools/render/Release/synthmatch_render --note 60 --note 64 --note 67 --set osc1_wave=square --set osc2_level=0.6 --set osc2_fine=8 --out chord.wav
 ```
 
 ```bash

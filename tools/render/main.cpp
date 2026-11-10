@@ -31,11 +31,14 @@ void printUsage()
 
 void listParams()
 {
-    std::printf("%-18s %-14s %10s %10s %10s  %s\n", "id", "name", "min", "max", "default", "unit");
+    std::printf("%-16s %-18s %8s %8s %8s  %s\n", "id", "name", "min", "max", "default", "unit / choices");
     for (const auto& s : synthmatch::schema()) {
-        std::printf("%-18.*s %-14.*s %10g %10g %10g  %.*s\n", static_cast<int>(s.id.size()), s.id.data(),
-                    static_cast<int>(s.name.size()), s.name.data(), s.min, s.max, s.defaultValue,
-                    static_cast<int>(s.unit.size()), s.unit.data());
+        std::string extra(s.unit);
+        for (std::size_t i = 0; i < s.choices.size(); ++i)
+            extra += (i == 0 ? "" : " | ") + std::string(s.choices[i]);
+
+        std::printf("%-16.*s %-18.*s %8g %8g %8g  %s\n", static_cast<int>(s.id.size()), s.id.data(),
+                    static_cast<int>(s.name.size()), s.name.data(), s.min, s.max, s.defaultValue, extra.c_str());
     }
 }
 
@@ -117,11 +120,13 @@ int main(int argc, char** argv)
             const auto index = synthmatch::findParam(kv.substr(0, eq));
             if (!index)
                 return fail("unknown parameter '" + std::string(kv.substr(0, eq)) + "' (see --list-params)");
-            double v = 0.0;
-            const std::string number(kv.substr(eq + 1));
-            if (!parseDouble(number.c_str(), v))
-                return fail("bad value in --set " + std::string(kv));
             const auto& s = synthmatch::spec(*index);
+            double v = 0.0;
+            const std::string text(kv.substr(eq + 1));
+            if (const auto choice = synthmatch::parseChoice(s, text))
+                v = *choice; // a named choice such as osc1_wave=square
+            else if (!parseDouble(text.c_str(), v))
+                return fail("bad value in --set " + std::string(kv));
             if (v < s.min || v > s.max)
                 std::fprintf(stderr, "warning: %s clamped to [%g, %g]\n", std::string(s.id).c_str(), s.min, s.max);
             params[static_cast<std::size_t>(*index)] = synthmatch::clampToRange(s, static_cast<float>(v));

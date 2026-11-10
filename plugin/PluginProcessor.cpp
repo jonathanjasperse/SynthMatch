@@ -3,6 +3,7 @@
 #include "synthmatch/Params.h"
 
 #include <algorithm>
+#include <string>
 #include <string_view>
 
 namespace {
@@ -36,9 +37,28 @@ juce::AudioProcessorValueTreeState::ParameterLayout SynthMatchProcessor::createL
             [i](float, float, float v) { return synthmatch::toNormalized(synthmatch::spec(i), v); },
             [i](float, float, float v) { return synthmatch::clampToRange(synthmatch::spec(i), v); });
 
-        layout.add(std::make_unique<juce::AudioParameterFloat>(
-            juce::ParameterID{toJuce(s.id), 1}, toJuce(s.name), range, s.defaultValue,
-            juce::AudioParameterFloatAttributes().withLabel(toJuce(s.unit))));
+        auto attributes = juce::AudioParameterFloatAttributes().withLabel(toJuce(s.unit));
+
+        if (!s.choices.empty()) {
+            // Selectors show their choice names ("saw") instead of numbers.
+            attributes = attributes
+                             .withStringFromValueFunction([i](float value, int) {
+                                 return toJuce(synthmatch::choiceName(synthmatch::spec(i), value));
+                             })
+                             .withValueFromStringFunction([i](const juce::String& text) {
+                                 const auto& sp = synthmatch::spec(i);
+                                 const std::string name = text.trim().toLowerCase().toStdString();
+                                 if (const auto value = synthmatch::parseChoice(sp, name))
+                                     return *value;
+                                 return synthmatch::clampToRange(sp, text.getFloatValue());
+                             });
+        } else if (s.curve == synthmatch::Curve::Stepped) {
+            attributes = attributes.withStringFromValueFunction(
+                [](float value, int) { return juce::String(juce::roundToInt(value)); });
+        }
+
+        layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{toJuce(s.id), 1}, toJuce(s.name),
+                                                               range, s.defaultValue, attributes));
     }
 
     return layout;

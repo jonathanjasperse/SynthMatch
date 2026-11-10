@@ -1,0 +1,2 @@
+# Golden renders: raw little-endian float32 samples.
+*.f32 binary

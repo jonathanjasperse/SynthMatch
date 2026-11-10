@@ -6,8 +6,12 @@
 // Real-time rules: after prepare(), nothing here allocates, locks or does I/O.
 // Output is deterministic: the same parameters and note events always produce
 // the same samples.
+//
+// Signal path per voice: 3 oscillators + noise -> mixer -> amp envelope.
 
 #include "synthmatch/Params.h"
+#include "synthmatch/dsp/Envelope.h"
+#include "synthmatch/dsp/Oscillator.h"
 
 #include <array>
 #include <cstddef>
@@ -37,16 +41,21 @@ public:
     int activeVoiceCount() const;
 
 private:
-    enum class Stage : std::uint8_t { Idle, Attack, Sustain, Release };
-
     struct Voice {
-        Stage stage = Stage::Idle;
+        dsp::AdsrState amp;
         int note = -1;
         float velocity = 0.0f;
-        double phase = 0.0;     // [0, 1)
-        double increment = 0.0; // cycles per sample
-        float env = 0.0f;
+        double baseHz = 0.0;
+        std::array<double, param::kNumOscs> phase{}; // each in [0, 1)
+        std::uint32_t noiseState = 1;
         std::uint64_t startOrder = 0;
+    };
+
+    struct OscSettings {
+        dsp::Wave wave = dsp::Wave::Saw;
+        double level = 0.0;
+        double pitchRatio = 1.0; // from coarse and fine tuning
+        double pulseWidth = 0.5;
     };
 
     Voice& allocateVoice();
@@ -59,8 +68,9 @@ private:
 
     // Values derived from params_ and the sample rate.
     float gain_ = 1.0f;
-    float attackStep_ = 1.0f;
-    float releaseCoeff_ = 0.0f;
+    dsp::AdsrCoeffs ampEnv_;
+    std::array<OscSettings, param::kNumOscs> oscs_{};
+    double noiseLevel_ = 0.0;
 };
 
 } // namespace synthmatch
