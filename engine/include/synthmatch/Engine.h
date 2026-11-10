@@ -7,10 +7,12 @@
 // Output is deterministic: the same parameters and note events always produce
 // the same samples.
 //
-// Signal path per voice: 3 oscillators + noise -> mixer -> amp envelope.
+// Signal path per voice: 3 oscillators + noise -> mixer -> filter -> amp envelope.
+// The filter's cutoff follows the note (key tracking) and its own envelope.
 
 #include "synthmatch/Params.h"
 #include "synthmatch/dsp/Envelope.h"
+#include "synthmatch/dsp/Filter.h"
 #include "synthmatch/dsp/Oscillator.h"
 
 #include <array>
@@ -43,6 +45,8 @@ public:
 private:
     struct Voice {
         dsp::AdsrState amp;
+        dsp::AdsrState filterEnv;
+        dsp::SvfState filter;
         int note = -1;
         float velocity = 0.0f;
         double baseHz = 0.0;
@@ -71,6 +75,13 @@ private:
     dsp::AdsrCoeffs ampEnv_;
     std::array<OscSettings, param::kNumOscs> oscs_{};
     double noiseLevel_ = 0.0;
+
+    dsp::FilterType filterType_ = dsp::FilterType::LowPass;
+    double filterCutoffHz_ = 20000.0;
+    double filterDamping_ = 1.0; // 1/Q, from the resonance parameter
+    double filterKeyTrack_ = 0.0;
+    double filterEnvOctaves_ = 0.0;
+    dsp::AdsrCoeffs filterEnv_;
 };
 
 } // namespace synthmatch

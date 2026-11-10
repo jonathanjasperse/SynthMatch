@@ -40,8 +40,9 @@ Built in slices:
 - [x] **1a** Oscillators and amp envelope: 3 band-limited oscillators (sine,
   triangle, saw, square with pulse width), coarse and fine tuning, mixer levels,
   white noise, ADSR amp envelope, golden-render tests.
-- [ ] **1b** Filter: state-variable (ZDF) low-pass, band-pass and high-pass with
-  cutoff, resonance and key tracking, plus an ADSR filter envelope.
+- [x] **1b** Filter: state-variable (ZDF) low-pass, band-pass and high-pass with
+  cutoff, resonance and key tracking, plus an ADSR filter envelope. The filter
+  is always in the signal path; the default is a low-pass fully open at 20 kHz.
 - [ ] **1c** Modulation and width: 2 LFOs with assignable targets, unison with
   detune and stereo spread, pitch bend.
 - [ ] **1d** Polish: parameter smoothing (no zipper noise), click-free voice

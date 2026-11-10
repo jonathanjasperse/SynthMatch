@@ -31,13 +31,13 @@ void printUsage()
 
 void listParams()
 {
-    std::printf("%-16s %-18s %8s %8s %8s  %s\n", "id", "name", "min", "max", "default", "unit / choices");
+    std::printf("%-18s %-18s %8s %8s %8s  %s\n", "id", "name", "min", "max", "default", "unit / choices");
     for (const auto& s : synthmatch::schema()) {
         std::string extra(s.unit);
         for (std::size_t i = 0; i < s.choices.size(); ++i)
             extra += (i == 0 ? "" : " | ") + std::string(s.choices[i]);
 
-        std::printf("%-16.*s %-18.*s %8g %8g %8g  %s\n", static_cast<int>(s.id.size()), s.id.data(),
+        std::printf("%-18.*s %-18.*s %8g %8g %8g  %s\n", static_cast<int>(s.id.size()), s.id.data(),
                     static_cast<int>(s.name.size()), s.name.data(), s.min, s.max, s.defaultValue, extra.c_str());
     }
 }

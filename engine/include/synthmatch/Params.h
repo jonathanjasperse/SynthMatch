@@ -60,6 +60,16 @@ enum Index : int {
 
     NoiseLevel,
 
+    FilterType,
+    FilterCutoffHz,
+    FilterResonance,
+    FilterKeyTrack,
+    FilterEnvAmount,
+    FilterAttackMs,
+    FilterDecayMs,
+    FilterSustain,
+    FilterReleaseMs,
+
     Count
 };
 

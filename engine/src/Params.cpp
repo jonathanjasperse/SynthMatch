@@ -1,5 +1,6 @@
 #include "synthmatch/Params.h"
 
+#include "synthmatch/dsp/Filter.h"
 #include "synthmatch/dsp/Oscillator.h"
 
 #include <algorithm>
@@ -16,6 +17,12 @@ static_assert(kWaveNames.size() == static_cast<std::size_t>(dsp::Wave::Count));
 
 constexpr float kSaw = static_cast<float>(dsp::Wave::Saw);
 constexpr float kLastWave = static_cast<float>(dsp::Wave::Count) - 1.0f;
+
+// Same order as dsp::FilterType.
+constexpr std::array<std::string_view, 3> kFilterNames{"lowpass", "bandpass", "highpass"};
+static_assert(kFilterNames.size() == static_cast<std::size_t>(dsp::FilterType::Count));
+
+constexpr float kLastFilter = static_cast<float>(dsp::FilterType::Count) - 1.0f;
 
 // Same order as param::Index. Never reorder or reuse ids: saved presets and
 // trained models refer to parameters by id.
@@ -45,6 +52,19 @@ constexpr std::array<ParamSpec, kNumParams> kSchema{{
     {"osc3_pw", "Osc 3 Pulse Width", 0.05f, 0.95f, 0.5f, Curve::Linear, ""},
 
     {"noise_level", "Noise Level", 0.0f, 1.0f, 0.0f, Curve::Linear, ""},
+
+    // The default filter is a fully open low-pass. Key tracking moves the
+    // cutoff with the note (1 = one octave per octave, centred on middle C).
+    // The envelope amount is how far the filter envelope moves the cutoff.
+    {"filter_type", "Filter Type", 0.0f, kLastFilter, 0.0f, Curve::Stepped, "", kFilterNames},
+    {"filter_cutoff_hz", "Filter Cutoff", 20.0f, 20000.0f, 20000.0f, Curve::Log, "Hz"},
+    {"filter_resonance", "Filter Resonance", 0.0f, 1.0f, 0.0f, Curve::Linear, ""},
+    {"filter_keytrack", "Filter Key Track", 0.0f, 1.0f, 0.0f, Curve::Linear, ""},
+    {"filter_env_amount", "Filter Env Amount", -8.0f, 8.0f, 0.0f, Curve::Linear, "oct"},
+    {"filter_attack_ms", "Filter Attack", 0.1f, 5000.0f, 5.0f, Curve::Log, "ms"},
+    {"filter_decay_ms", "Filter Decay", 1.0f, 10000.0f, 300.0f, Curve::Log, "ms"},
+    {"filter_sustain", "Filter Sustain", 0.0f, 1.0f, 0.5f, Curve::Linear, ""},
+    {"filter_release_ms", "Filter Release", 1.0f, 10000.0f, 200.0f, Curve::Log, "ms"},
 }};
 
 } // namespace

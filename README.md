@@ -3,9 +3,11 @@
 A synth plugin that listens to a reference recording of a synth and builds a
 preset that sounds like it. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan.
 
-**Status:** Stage 1a. The plugin is a 16-voice synth with 3 band-limited
+**Status:** Stage 1b. The plugin is a 16-voice synth with 3 band-limited
 oscillators (sine, triangle, saw, square with pulse width), tuning, a mixer,
-white noise and an ADSR amp envelope. The filter, LFOs and unison come next.
+white noise, a resonant filter (low-pass, band-pass, high-pass) with key
+tracking and its own envelope, and an ADSR amp envelope. LFOs and unison come
+next.
 
 ## Layout
 
@@ -70,6 +72,10 @@ build/tests/Release/synthmatch_engine_tests --update-golden
 
 ```bash
 build/tools/render/Release/synthmatch_render --note 60 --note 64 --note 67 --set osc1_wave=square --set osc2_level=0.6 --set osc2_fine=8 --out chord.wav
+```
+
+```bash
+build/tools/render/Release/synthmatch_render --note 36 --set filter_cutoff_hz=120 --set filter_resonance=0.6 --set filter_env_amount=6 --set filter_decay_ms=900 --set filter_sustain=0.15 --out sweep.wav
 ```
 
 ```bash

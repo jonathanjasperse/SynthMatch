@@ -7,6 +7,7 @@
 #include "synthmatch/Params.h"
 #include "synthmatch/Render.h"
 #include "synthmatch/dsp/Envelope.h"
+#include "synthmatch/dsp/Filter.h"
 #include "synthmatch/dsp/Oscillator.h"
 
 #include <algorithm>
@@ -52,6 +53,7 @@ bool g_updateGolden = false;
     } while (0)
 
 using namespace synthmatch;
+using dsp::FilterType;
 using dsp::Wave;
 
 constexpr double kPi = std::numbers::pi;
@@ -135,6 +137,66 @@ StereoBuffer renderNote(const ParamValues& params, int note, double length, doub
     return render(params, events, settings);
 }
 
+// A bright, steady patch for filter tests: one saw at full level.
+ParamValues sawPatch()
+{
+    auto p = defaultValues();
+    p[param::GainDb] = 0.0f;
+    p[param::AmpAttackMs] = 1.0f;
+    return p;
+}
+
+// The gain the filter should have at a frequency: the textbook two-pole
+// response, with the frequency axis warped the way a digital filter warps it.
+double svfGain(FilterType type, double sampleRate, double cutoffHz, double damping, double hz)
+{
+    const double w = std::tan(kPi * hz / sampleRate) / std::tan(kPi * cutoffHz / sampleRate);
+    const double den = std::hypot(1.0 - w * w, damping * w);
+    switch (type) {
+    case FilterType::BandPass:
+        return w / den;
+    case FilterType::HighPass:
+        return w * w / den;
+    default:
+        return 1.0 / den;
+    }
+}
+
+double noteHz(int note) { return 440.0 * std::pow(2.0, (note - 69) / 12.0); }
+
+// Renders a held saw note and compares its first 10 harmonics with the raw
+// oscillator's harmonics times the filter gain expected for the given cutoff.
+// Returns the worst relative error. The note must be an A (110, 220, 440 or
+// 880 Hz) so that half a second holds a whole number of cycles.
+double filteredSawError(const ParamValues& p, int note, double expectedCutoffHz)
+{
+    const double sr = 48000.0;
+    const double hz = noteHz(note);
+    const auto audio = renderNote(p, note, 1.0, 0.0, sr);
+    const std::vector<double> steady(audio.left.begin() + static_cast<std::ptrdiff_t>(at(0.5, sr)),
+                                     audio.left.begin() + static_cast<std::ptrdiff_t>(at(1.0, sr)));
+    const auto raw = runOsc(Wave::Saw, hz / sr, steady.size());
+
+    const auto type = static_cast<FilterType>(static_cast<int>(p[param::FilterType]));
+    const double damping = dsp::resonanceToDamping(p[param::FilterResonance]);
+
+    double worst = 0.0;
+    for (int h = 1; h <= 10; ++h) {
+        const double f = h * hz / sr;
+        const double expected = amplitudeAt(raw, f) * svfGain(type, sr, expectedCutoffHz, damping, h * hz);
+        worst = std::max(worst, std::abs(amplitudeAt(steady, f) - expected) / (expected + 1.0e-3));
+    }
+    return worst;
+}
+
+// Amplitude of one frequency inside a time window of a render.
+double harmonicIn(const StereoBuffer& audio, double fromSec, double toSec, double hz)
+{
+    const std::vector<double> window(audio.left.begin() + static_cast<std::ptrdiff_t>(at(fromSec, audio.sampleRate)),
+                                     audio.left.begin() + static_cast<std::ptrdiff_t>(at(toSec, audio.sampleRate)));
+    return amplitudeAt(window, hz / audio.sampleRate);
+}
+
 // ---------------------------------------------------------------- schema
 
 void testSchema()
@@ -167,6 +229,9 @@ void testSchema()
     CHECK(findParam("osc2_fine") == param::Osc2Fine);
     CHECK(findParam("osc3_pw") == param::osc(2, param::OscPulseWidth));
     CHECK(findParam("noise_level") == param::NoiseLevel);
+    CHECK(findParam("filter_type") == param::FilterType);
+    CHECK(findParam("filter_release_ms") == param::FilterReleaseMs);
+    CHECK(kNumParams == 30);
     CHECK(!findParam("does_not_exist"));
 
     const auto& wave = spec(param::Osc1Wave);
@@ -174,6 +239,8 @@ void testSchema()
     CHECK(parseChoice(wave, "triangle") == 1.0f);
     CHECK(!parseChoice(wave, "banana"));
     CHECK(choiceName(spec(param::GainDb), 0.0f).empty());
+    CHECK(choiceName(spec(param::FilterType), 2.0f) == "highpass");
+    CHECK(parseChoice(spec(param::FilterType), "bandpass") == 1.0f);
 }
 
 // ---------------------------------------------------------------- oscillators
@@ -430,6 +497,11 @@ void testNoise()
     auto p = sinePatch();
     p[param::Osc1Level] = 0.0f;
     p[param::NoiseLevel] = 0.5f;
+    // Measure the noise source itself: a 20 Hz high-pass leaves all but the
+    // lowest 0.1% of the band untouched, where the default 20 kHz low-pass
+    // would remove the top of it.
+    p[param::FilterType] = static_cast<float>(FilterType::HighPass);
+    p[param::FilterCutoffHz] = 20.0f;
 
     const double sr = 48000.0;
     const auto audio = renderNote(p, 60, 1.0, 0.0, sr);
@@ -444,7 +516,8 @@ void testNoise()
     CHECK_NEAR(sum / count, 0.0, 0.01);
     // Uniform noise in [-0.5, 0.5] has an RMS of 0.5 / sqrt(3).
     CHECK_NEAR(std::sqrt(sumSq / count), 0.5 / std::sqrt(3.0), 0.01);
-    CHECK(peak(audio.left, from, to) <= 0.5f);
+    // 0.5 from the source, plus the slow drift (about 0.01 RMS) the high-pass removes.
+    CHECK(peak(audio.left, from, to) <= 0.56f);
 }
 
 void testEnvelopeInEngine()
@@ -521,6 +594,214 @@ void testExtremeNotes()
     }
 }
 
+// ---------------------------------------------------------------- filter
+
+void testFilterResponse()
+{
+    const double sr = 48000.0;
+    const double cutoff = 1000.0;
+
+    // Resonance 0 is a flat (Butterworth) response; resonance 1 is the maximum Q.
+    CHECK_NEAR(dsp::resonanceToDamping(0.0), std::sqrt(2.0), 1e-12);
+    CHECK_NEAR(dsp::resonanceToDamping(1.0), 1.0 / dsp::kMaxFilterQ, 1e-12);
+
+    const auto measure = [&](FilterType type, double damping, double hz) {
+        const auto c = dsp::SvfCoeffs::make(sr, cutoff, damping);
+        dsp::SvfState s;
+        const std::size_t settle = 48000, n = 4800; // 0.1 s: whole cycles of every test tone
+        std::vector<double> out(n);
+        for (std::size_t i = 0; i < settle + n; ++i) {
+            const double y = dsp::svfTick(s, c, type, std::sin(2.0 * kPi * hz * static_cast<double>(i) / sr));
+            if (i >= settle)
+                out[i - settle] = y;
+        }
+        return amplitudeAt(out, hz / sr);
+    };
+
+    for (const FilterType type : {FilterType::LowPass, FilterType::BandPass, FilterType::HighPass}) {
+        for (const double resonance : {0.0, 0.5, 0.9}) {
+            const double k = dsp::resonanceToDamping(resonance);
+            for (const double hz : {100.0, 500.0, 1000.0, 2000.0, 8000.0, 15000.0}) {
+                const double expected = svfGain(type, sr, cutoff, k, hz);
+                CHECK_NEAR(measure(type, k, hz), expected, 1e-6 * (1.0 + expected));
+            }
+            // Every type has a gain of Q at the cutoff.
+            CHECK_NEAR(measure(type, k, cutoff), 1.0 / k, 1e-6 / k);
+        }
+    }
+
+    // 12 dB per octave: two octaves past the cutoff is about 24 dB down.
+    // (toDb takes a power ratio, so amplitudes are squared.)
+    const double k = dsp::resonanceToDamping(0.0);
+    const auto ampDb = [](double amplitude) { return toDb(amplitude * amplitude); };
+    CHECK_NEAR(ampDb(measure(FilterType::LowPass, k, 4000.0)), -24.0, 1.0);
+    CHECK_NEAR(ampDb(measure(FilterType::HighPass, k, 250.0)), -24.0, 1.0);
+    CHECK_NEAR(ampDb(measure(FilterType::LowPass, k, cutoff)), -3.01, 0.01);
+
+    // Out-of-range cutoffs are clamped rather than breaking the filter.
+    CHECK_NEAR(dsp::clampCutoff(1.0, sr), dsp::kMinCutoffHz, 1e-12);
+    CHECK_NEAR(dsp::clampCutoff(1.0e6, sr), dsp::kMaxCutoffHz, 1e-12);
+    CHECK(dsp::clampCutoff(1.0e6, 22050.0) < 0.5 * 22050.0);
+}
+
+void testFilterInEngine()
+{
+    // The default patch has a fully open low-pass at 20 kHz.
+    CHECK(filteredSawError(sawPatch(), 57, 20000.0) < 2e-3);
+
+    for (const FilterType type : {FilterType::LowPass, FilterType::BandPass, FilterType::HighPass}) {
+        for (const float resonance : {0.0f, 0.6f}) {
+            auto p = sawPatch();
+            p[param::FilterType] = static_cast<float>(type);
+            p[param::FilterCutoffHz] = 1000.0f;
+            p[param::FilterResonance] = resonance;
+            CHECK(filteredSawError(p, 57, 1000.0) < 2e-3);
+            CHECK(filteredSawError(p, 57, 1100.0) > 2e-2); // the check can tell a wrong cutoff
+        }
+    }
+}
+
+void testFilterKeyTracking()
+{
+    auto p = sawPatch();
+    p[param::FilterCutoffHz] = 600.0f;
+    p[param::FilterResonance] = 0.3f;
+
+    // No tracking: the same cutoff for every note.
+    CHECK(filteredSawError(p, 57, 600.0) < 2e-3);
+    CHECK(filteredSawError(p, 81, 600.0) < 2e-3);
+
+    // Full tracking: the cutoff moves with the note, centred on middle C (60).
+    p[param::FilterKeyTrack] = 1.0f;
+    CHECK(filteredSawError(p, 57, 600.0 * std::pow(2.0, -3.0 / 12.0)) < 2e-3);
+    CHECK(filteredSawError(p, 81, 600.0 * std::pow(2.0, 21.0 / 12.0)) < 2e-3);
+
+    // Half tracking: half as far.
+    p[param::FilterKeyTrack] = 0.5f;
+    CHECK(filteredSawError(p, 81, 600.0 * std::pow(2.0, 0.5 * 21.0 / 12.0)) < 2e-3);
+}
+
+void testFilterEnvelope()
+{
+    // Held at a sustain of 1, the envelope raises the cutoff by the full amount.
+    auto p = sawPatch();
+    p[param::FilterCutoffHz] = 250.0f;
+    p[param::FilterEnvAmount] = 3.0f; // octaves
+    p[param::FilterAttackMs] = 1.0f;
+    p[param::FilterSustain] = 1.0f;
+    CHECK(filteredSawError(p, 57, 2000.0) < 2e-3);
+
+    // At a sustain of 0.5 it settles halfway (in octaves).
+    p[param::FilterEnvAmount] = 4.0f;
+    p[param::FilterDecayMs] = 50.0f;
+    p[param::FilterSustain] = 0.5f;
+    CHECK(filteredSawError(p, 57, 1000.0) < 2e-3);
+
+    // A negative amount lowers the cutoff.
+    p[param::FilterCutoffHz] = 4000.0f;
+    p[param::FilterEnvAmount] = -2.0f;
+    p[param::FilterSustain] = 1.0f;
+    CHECK(filteredSawError(p, 57, 1000.0) < 2e-3);
+
+    // A decaying envelope makes the note start bright and end dull. Harmonic 20
+    // of a 110 Hz note is 2.2 kHz; windows are 0.1 s = 11 whole cycles.
+    const double sr = 48000.0;
+    auto sweep = sawPatch();
+    sweep[param::FilterCutoffHz] = 150.0f;
+    sweep[param::FilterEnvAmount] = 7.0f;
+    sweep[param::FilterAttackMs] = 1.0f;
+    sweep[param::FilterDecayMs] = 1000.0f; // time to fall 60 dB, so it is half-way down by 0.1 s
+    sweep[param::FilterSustain] = 0.0f;
+    const auto swept = renderNote(sweep, 45, 1.0, 0.0, sr);
+    const double early = harmonicIn(swept, 0.01, 0.11, 2200.0);
+    const double late = harmonicIn(swept, 0.5, 0.6, 2200.0);
+    CHECK(early > 0.01);
+    CHECK(early > 10.0 * late);
+
+    // With no envelope amount the same note doesn't change over time.
+    sweep[param::FilterEnvAmount] = 0.0f;
+    const auto fixed = renderNote(sweep, 45, 1.0, 0.0, sr);
+    CHECK_NEAR(harmonicIn(fixed, 0.1, 0.2, 110.0), harmonicIn(fixed, 0.5, 0.6, 110.0), 1e-3);
+
+    // After the key is released the filter envelope falls, closing the filter
+    // while the (slow) amp release is still sounding.
+    auto rel = sawPatch();
+    rel[param::FilterCutoffHz] = 200.0f;
+    rel[param::FilterEnvAmount] = 4.0f;
+    rel[param::FilterAttackMs] = 1.0f;
+    rel[param::FilterSustain] = 1.0f;
+    rel[param::FilterReleaseMs] = 20.0f;
+    rel[param::AmpReleaseMs] = 2000.0f;
+    const auto released = renderNote(rel, 45, 0.3, 0.7, sr);
+    const double heldBrightness = harmonicIn(released, 0.1, 0.2, 1100.0) / harmonicIn(released, 0.1, 0.2, 110.0);
+    const double releasedBrightness = harmonicIn(released, 0.6, 0.7, 1100.0) / harmonicIn(released, 0.6, 0.7, 110.0);
+    CHECK(harmonicIn(released, 0.6, 0.7, 110.0) > 0.05); // still sounding
+    CHECK(releasedBrightness < 0.2 * heldBrightness);
+}
+
+void testBlockSizeIndependence()
+{
+    // The plugin processes blocks of any size, so the output must not depend on it.
+    auto p = defaultValues();
+    p[param::Osc2Level] = 0.5f;
+    p[param::Osc2Fine] = 7.0f;
+    p[param::NoiseLevel] = 0.2f;
+    p[param::FilterCutoffHz] = 300.0f;
+    p[param::FilterResonance] = 0.7f;
+    p[param::FilterKeyTrack] = 0.5f;
+    p[param::FilterEnvAmount] = 4.0f;
+    p[param::FilterDecayMs] = 120.0f;
+    p[param::FilterSustain] = 0.2f;
+
+    const NoteEvent notes[] = {{0.0, 0.2, 48, 0.9f}, {0.0501, 0.2, 55, 0.7f}, {0.13, 0.1, 64, 0.8f}};
+    std::vector<float> reference;
+    for (const int blockSize : {256, 1, 32, 1000}) {
+        RenderSettings settings;
+        settings.blockSize = blockSize;
+        settings.tailSec = 0.2;
+        const auto audio = render(p, notes, settings);
+        if (reference.empty()) {
+            reference = audio.left;
+            CHECK(peak(reference, 0, reference.size()) > 0.05f);
+        }
+        CHECK(audio.left == reference);
+    }
+}
+
+void testFilterStability()
+{
+    // Every extreme at once: maximum resonance, cutoff and envelope amount at
+    // both ends, full key tracking, the highest and lowest notes, noise.
+    for (const double sr : {44100.0, 48000.0, 96000.0}) {
+        for (const FilterType type : {FilterType::LowPass, FilterType::BandPass, FilterType::HighPass}) {
+            for (const float amount : {-8.0f, 8.0f}) {
+                for (const int note : {0, 127}) {
+                    auto p = defaultValues();
+                    p[param::GainDb] = 0.0f;
+                    p[param::Osc2Level] = 1.0f;
+                    p[param::Osc2Wave] = static_cast<float>(Wave::Square);
+                    p[param::NoiseLevel] = 1.0f;
+                    p[param::FilterType] = static_cast<float>(type);
+                    p[param::FilterCutoffHz] = amount > 0.0f ? 20000.0f : 20.0f;
+                    p[param::FilterResonance] = 1.0f;
+                    p[param::FilterKeyTrack] = 1.0f;
+                    p[param::FilterEnvAmount] = amount;
+                    p[param::FilterAttackMs] = 0.1f;
+                    p[param::FilterDecayMs] = 30.0f;
+                    p[param::FilterSustain] = 0.0f;
+
+                    const auto audio = renderNote(p, note, 0.15, 0.1, sr);
+                    bool finite = true;
+                    for (const float s : audio.left)
+                        finite = finite && std::isfinite(s);
+                    CHECK(finite);
+                    CHECK(peak(audio.left, 0, audio.numFrames()) < 100.0f);
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- golden renders
 
 struct GoldenCase {
@@ -572,6 +853,46 @@ std::vector<GoldenCase> goldenCases()
         p[param::AmpDecayMs] = 120.0f;
         p[param::AmpSustain] = 0.0f;
         cases.push_back({"noise_pluck", p, {{0.0, 0.25, 72, 1.0f}}});
+    }
+
+    {
+        // A resonant low-pass swept down by the filter envelope.
+        auto p = defaultValues();
+        p[param::FilterCutoffHz] = 200.0f;
+        p[param::FilterResonance] = 0.65f;
+        p[param::FilterEnvAmount] = 5.0f;
+        p[param::FilterAttackMs] = 2.0f;
+        p[param::FilterDecayMs] = 150.0f;
+        p[param::FilterSustain] = 0.2f;
+        p[param::FilterReleaseMs] = 80.0f;
+        cases.push_back({"lowpass_sweep_e2", p, {{0.0, 0.25, 40, 0.9f}}});
+    }
+
+    {
+        // A key-tracked high-pass on a square and noise, with overlapping notes.
+        auto p = defaultValues();
+        p[param::Osc1Wave] = static_cast<float>(Wave::Square);
+        p[param::NoiseLevel] = 0.3f;
+        p[param::FilterType] = static_cast<float>(FilterType::HighPass);
+        p[param::FilterCutoffHz] = 700.0f;
+        p[param::FilterResonance] = 0.4f;
+        p[param::FilterKeyTrack] = 1.0f;
+        p[param::AmpReleaseMs] = 60.0f;
+        cases.push_back({"highpass_keytrack", p, {{0.0, 0.2, 52, 0.8f}, {0.08, 0.17, 64, 0.9f}}});
+    }
+
+    {
+        // A narrow band-pass that the envelope moves downwards.
+        auto p = defaultValues();
+        p[param::Osc2Level] = 0.7f;
+        p[param::Osc2Coarse] = 7.0f;
+        p[param::FilterType] = static_cast<float>(FilterType::BandPass);
+        p[param::FilterCutoffHz] = 2500.0f;
+        p[param::FilterResonance] = 0.8f;
+        p[param::FilterEnvAmount] = -2.5f;
+        p[param::FilterAttackMs] = 60.0f;
+        p[param::FilterSustain] = 0.8f;
+        cases.push_back({"bandpass_res_g3", p, {{0.0, 0.25, 55, 1.0f}}});
     }
 
     return cases;
@@ -662,6 +983,12 @@ int main(int argc, char** argv)
     testSustainZeroFreesVoice();
     testVoiceStealing();
     testExtremeNotes();
+    testFilterResponse();
+    testFilterInEngine();
+    testFilterKeyTracking();
+    testFilterEnvelope();
+    testBlockSizeIndependence();
+    testFilterStability();
     testGoldenRenders();
     testWavFile();
 

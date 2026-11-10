@@ -11,6 +11,9 @@ namespace {
 // Oscillators stay below this fraction of the sample rate.
 constexpr double kMaxPhaseIncrement = 0.45;
 
+// Key tracking leaves the cutoff unchanged at this note (middle C).
+constexpr int kKeyTrackCentreNote = 60;
+
 double noteToHz(int note) { return 440.0 * std::pow(2.0, (note - 69) / 12.0); }
 
 // xorshift32: a tiny deterministic random generator. Returns white noise in [-1, 1).
@@ -75,6 +78,14 @@ void Engine::updateDerived()
     }
 
     noiseLevel_ = p(param::NoiseLevel);
+
+    filterType_ = static_cast<dsp::FilterType>(static_cast<int>(p(param::FilterType)));
+    filterCutoffHz_ = p(param::FilterCutoffHz);
+    filterDamping_ = dsp::resonanceToDamping(p(param::FilterResonance));
+    filterKeyTrack_ = p(param::FilterKeyTrack);
+    filterEnvOctaves_ = p(param::FilterEnvAmount);
+    filterEnv_ = dsp::AdsrCoeffs::make(sampleRate_, p(param::FilterAttackMs), p(param::FilterDecayMs),
+                                       p(param::FilterSustain), p(param::FilterReleaseMs));
 }
 
 Engine::Voice& Engine::allocateVoice()
@@ -98,7 +109,14 @@ void Engine::noteOn(int note, float velocity)
     }
 
     Voice& v = allocateVoice();
-    v.amp.gateOn(); // a stolen voice ramps up from its current level
+    if (!v.amp.active()) {
+        // A free voice starts clean. A stolen one keeps its filter and
+        // envelope state, so it ramps from where it is instead of jumping.
+        v.filterEnv = {};
+        v.filter = {};
+    }
+    v.amp.gateOn();
+    v.filterEnv.gateOn();
     v.note = note;
     v.velocity = std::min(velocity, 1.0f);
     v.baseHz = noteToHz(note);
@@ -111,14 +129,18 @@ void Engine::noteOn(int note, float velocity)
 void Engine::noteOff(int note)
 {
     for (auto& v : voices_)
-        if (v.note == note && v.amp.stage != dsp::AdsrState::Stage::Release)
+        if (v.note == note && v.amp.stage != dsp::AdsrState::Stage::Release) {
             v.amp.gateOff();
+            v.filterEnv.gateOff();
+        }
 }
 
 void Engine::allNotesOff()
 {
-    for (auto& v : voices_)
+    for (auto& v : voices_) {
         v.amp.gateOff();
+        v.filterEnv.gateOff();
+    }
 }
 
 void Engine::allSoundOff() { voices_.fill(Voice{}); }
@@ -141,10 +163,30 @@ void Engine::process(float* left, float* right, int numSamples)
         for (std::size_t k = 0; k < increment.size(); ++k)
             increment[k] = std::min(kMaxPhaseIncrement, v.baseHz * oscs_[k].pitchRatio / sampleRate_);
 
+        // The cutoff for this voice before the envelope moves it.
+        const double keyOctaves = filterKeyTrack_ * (v.note - kKeyTrackCentreNote) / 12.0;
+        const double voiceCutoffHz = filterCutoffHz_ * std::exp2(keyOctaves);
+        const bool envMovesCutoff = filterEnvOctaves_ != 0.0;
+
+        // The coefficients depend only on the parameters, the note and the
+        // envelope level, so the output doesn't depend on the block size.
+        const auto filterCoeffs = [&](float envLevel) {
+            const double hz = envMovesCutoff ? voiceCutoffHz * std::exp2(filterEnvOctaves_ * envLevel) : voiceCutoffHz;
+            return dsp::SvfCoeffs::make(sampleRate_, hz, filterDamping_);
+        };
+        float coeffsEnvLevel = v.filterEnv.level;
+        dsp::SvfCoeffs coeffs = filterCoeffs(coeffsEnvLevel);
+
         for (int i = 0; i < numSamples; ++i) {
             const float env = dsp::adsrTick(v.amp, ampEnv_);
             if (!v.amp.active())
                 break;
+
+            const float filterEnvLevel = dsp::adsrTick(v.filterEnv, filterEnv_);
+            if (envMovesCutoff && filterEnvLevel != coeffsEnvLevel) {
+                coeffsEnvLevel = filterEnvLevel;
+                coeffs = filterCoeffs(coeffsEnvLevel);
+            }
 
             double mix = 0.0;
             for (std::size_t k = 0; k < oscs_.size(); ++k) {
@@ -161,7 +203,9 @@ void Engine::process(float* left, float* right, int numSamples)
             if (noiseLevel_ > 0.0)
                 mix += noiseLevel_ * nextNoise(v.noiseState);
 
-            const float s = static_cast<float>(mix) * env * amp;
+            const double filtered = dsp::svfTick(v.filter, coeffs, filterType_, mix);
+
+            const float s = static_cast<float>(filtered) * env * amp;
             left[i] += s;
             right[i] += s;
         }
