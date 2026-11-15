@@ -1,5 +1,6 @@
 #include "ui/Backdrop.h"
 
+#include <array>
 #include <cmath>
 
 namespace theme {
@@ -7,6 +8,10 @@ namespace theme {
 namespace {
 
 using Pt = juce::Point<float>;
+
+constexpr float kPi = juce::MathConstants<float>::pi;
+// Light comes from the upper left of each gem.
+constexpr float kLightAngle = -2.2f;
 
 juce::Path polygon(std::initializer_list<Pt> points)
 {
@@ -23,92 +28,95 @@ juce::Path polygon(std::initializer_list<Pt> points)
     return p;
 }
 
-// A soft band of light across a face, like a reflection on polished metal.
+juce::Colour metal(float shade)
+{
+    // From near-black gunmetal to bright polished steel.
+    shade = juce::jlimit(0.0f, 1.0f, shade);
+    return juce::Colour(0xff0b0c0e).interpolatedWith(juce::Colour(0xffa7acb4), std::pow(shade, 1.6f));
+}
+
+// A soft band of light across a shape, like a reflection on polished metal.
 void streak(juce::Graphics& g, const juce::Path& clip, Pt from, Pt to, float strength)
 {
+    if (strength <= 0.0f)
+        return;
     juce::Graphics::ScopedSaveState save(g);
     g.reduceClipRegion(clip);
     juce::ColourGradient band(juce::Colours::white.withAlpha(0.0f), from, juce::Colours::white.withAlpha(0.0f), to, false);
-    band.addColour(0.42, juce::Colours::white.withAlpha(0.0f));
+    band.addColour(0.40, juce::Colours::white.withAlpha(0.0f));
     band.addColour(0.5, juce::Colours::white.withAlpha(strength));
-    band.addColour(0.58, juce::Colours::white.withAlpha(0.0f));
+    band.addColour(0.60, juce::Colours::white.withAlpha(0.0f));
     g.setGradientFill(band);
     g.fillPath(clip);
 }
 
-void tint(juce::Graphics& g, const juce::Path& face, Pt from, juce::Colour a, Pt to, juce::Colour b)
-{
-    g.setGradientFill(juce::ColourGradient(a, from, b, to, false));
-    g.fillPath(face);
-}
-
 } // namespace
 
-void drawCube(juce::Graphics& g, Pt c, float r, float cut, float opacity, float rotation)
+void drawGem(juce::Graphics& g, Pt c, float radius, float opacity, float shine)
 {
     juce::Graphics::ScopedSaveState save(g);
-    g.addTransform(juce::AffineTransform::rotation(rotation, c.x, c.y));
     g.setOpacity(opacity);
 
-    // A cube seen corner-on: a hexagon whose centre is the corner nearest to us.
-    const float k = std::sqrt(3.0f) * 0.5f;
-    const Pt top{c.x, c.y - r}, ur{c.x + k * r, c.y - 0.5f * r}, lr{c.x + k * r, c.y + 0.5f * r};
-    const Pt bottom{c.x, c.y + r}, ll{c.x - k * r, c.y + 0.5f * r}, ul{c.x - k * r, c.y - 0.5f * r};
-    // That corner is cut off, leaving a small triangular facet.
-    const Pt a = c + (ul - c) * cut, b = c + (ur - c) * cut, d = c + (bottom - c) * cut;
+    // Corners of the outline and of the flat top, pointing up.
+    std::array<Pt, 5> outer, inner;
+    const float top = radius * 0.5f;
+    for (int i = 0; i < 5; ++i) {
+        const float a = -kPi * 0.5f + static_cast<float>(i) * 2.0f * kPi / 5.0f;
+        outer[static_cast<std::size_t>(i)] = c + Pt(std::cos(a), std::sin(a)) * radius;
+        // The top sits a touch up and to the left: the gem is seen slightly from above.
+        inner[static_cast<std::size_t>(i)] = c + Pt(-0.04f, -0.05f) * radius + Pt(std::cos(a), std::sin(a)) * top;
+    }
+    const auto outline = polygon({outer[0], outer[1], outer[2], outer[3], outer[4]});
+    const auto table = polygon({inner[0], inner[1], inner[2], inner[3], inner[4]});
 
-    const auto topFace = polygon({top, ur, b, a, ul});
-    const auto leftFace = polygon({ul, a, d, bottom, ll});
-    const auto rightFace = polygon({ur, lr, bottom, d, b});
-    const auto facet = polygon({a, b, d});
-    const auto outline = polygon({top, ur, lr, bottom, ll, ul});
-
-    juce::DropShadow(juce::Colours::black.withAlpha(0.8f), static_cast<int>(r * 0.18f), {0, static_cast<int>(r * 0.06f)})
+    juce::DropShadow(juce::Colours::black.withAlpha(0.75f), juce::roundToInt(radius * 0.22f), {0, juce::roundToInt(radius * 0.08f)})
         .drawForPath(g, outline);
 
-    // Faces: the top catches the light, the right side is in shadow.
-    tint(g, topFace, top, juce::Colour(0xff6a6e76), (a + b) * 0.5f, juce::Colour(0xff202226));
-    tint(g, leftFace, ul, juce::Colour(0xff34363c), bottom, juce::Colour(0xff0b0c0e));
-    tint(g, rightFace, ur, juce::Colour(0xff1e2024), bottom, juce::Colour(0xff060607));
-
-    // A faint oil-on-metal shimmer: cool on the left, warm on the right.
-    tint(g, topFace, ul, juce::Colour(0x1a9fb4ff), ur, juce::Colour(0x10ffc6a0));
-    tint(g, leftFace, ul, juce::Colour(0x149aa8ff), bottom, juce::Colour(0x00000000));
-    tint(g, rightFace, lr, juce::Colour(0x0cffd2b4), b, juce::Colour(0x00000000));
-
-    // Reflections.
-    streak(g, leftFace, {ll.x - r * 0.1f, ul.y - r * 0.2f}, {d.x + r * 0.2f, bottom.y}, 0.10f);
-    streak(g, topFace, {ul.x, top.y}, {ur.x, b.y + r * 0.2f}, 0.14f);
-    streak(g, rightFace, {b.x, ur.y}, {lr.x, bottom.y + r * 0.3f}, 0.05f);
-
-    // The facet: dark, glossy glass with a bright upper edge.
-    tint(g, facet, (a + b) * 0.5f, juce::Colour(0xff2b2d33), d, juce::Colour(0xff030304));
-    {
-        juce::Graphics::ScopedSaveState inner(g);
-        g.reduceClipRegion(facet);
-        g.setGradientFill(juce::ColourGradient(juce::Colours::white.withAlpha(0.22f), a, juce::Colours::transparentWhite,
-                                               (a + d) * 0.5f, true));
+    // The five bevelled sides, each lit by how much it faces the light.
+    for (int i = 0; i < 5; ++i) {
+        const auto j = static_cast<std::size_t>((i + 1) % 5);
+        const auto k = static_cast<std::size_t>(i);
+        const auto facet = polygon({outer[k], outer[j], inner[j], inner[k]});
+        const float facing = -kPi * 0.5f + (static_cast<float>(i) + 0.5f) * 2.0f * kPi / 5.0f;
+        const float shade = 0.5f + 0.5f * std::cos(facing - kLightAngle);
+        const Pt edgeMid = (outer[k] + outer[j]) * 0.5f, innerMid = (inner[k] + inner[j]) * 0.5f;
+        g.setGradientFill(juce::ColourGradient(metal(shade * 0.75f), edgeMid, metal(shade * (0.85f + 0.15f * shine)), innerMid, false));
         g.fillPath(facet);
+
+        // A faint oil-on-metal shimmer: cool on the left, warm on the right.
+        const bool left = std::cos(facing) < 0.0f;
+        g.setColour(left ? juce::Colour(0x149db0ff) : juce::Colour(0x0cffc8a6));
+        g.fillPath(facet);
+
+        streak(g, facet, outer[k], inner[j], 0.10f * shade * (0.4f + shine));
     }
 
-    // Edges: polished highlights where the light hits, nearly invisible elsewhere.
-    const auto edge = [&](Pt p, Pt q, float alpha, float width = 1.0f) {
-        g.setGradientFill(juce::ColourGradient(juce::Colours::white.withAlpha(alpha), p,
-                                               juce::Colours::white.withAlpha(alpha * 0.25f), q, false));
-        g.drawLine({p, q}, width);
-    };
-    edge(top, ul, 0.30f);
-    edge(top, ur, 0.22f);
-    edge(a, b, 0.55f, 1.2f);
-    edge(a, ul, 0.20f);
-    edge(b, ur, 0.16f);
-    edge(a, d, 0.18f);
-    edge(b, d, 0.10f);
-    edge(d, bottom, 0.12f);
-    edge(ul, ll, 0.10f);
-    edge(ur, lr, 0.06f);
-    edge(ll, bottom, 0.05f);
-    edge(lr, bottom, 0.04f);
+    // The top: dark, glossy, with a reflection.
+    const auto& b = table.getBounds();
+    g.setGradientFill(juce::ColourGradient(juce::Colour(0xff2a2c31), b.getTopLeft(), juce::Colour(0xff050506), b.getBottomRight(), false));
+    g.fillPath(table);
+    {
+        juce::Graphics::ScopedSaveState inner2(g);
+        g.reduceClipRegion(table);
+        g.setGradientFill(juce::ColourGradient(juce::Colours::white.withAlpha(0.10f + 0.22f * shine), b.getTopLeft(),
+                                               juce::Colours::transparentWhite, b.getCentre(), true));
+        g.fillPath(table);
+    }
+    streak(g, table, {b.getX(), b.getY()}, {b.getRight(), b.getBottom()}, 0.05f + 0.12f * shine);
+
+    // Edges: bright where they face the light, nearly gone elsewhere.
+    for (int i = 0; i < 5; ++i) {
+        const auto j = static_cast<std::size_t>((i + 1) % 5);
+        const auto k = static_cast<std::size_t>(i);
+        const float facing = -kPi * 0.5f + (static_cast<float>(i) + 0.5f) * 2.0f * kPi / 5.0f;
+        const float lit = 0.5f + 0.5f * std::cos(facing - kLightAngle);
+        g.setColour(juce::Colours::white.withAlpha(0.04f + 0.30f * lit * (0.5f + 0.5f * shine)));
+        g.drawLine({outer[k], outer[j]}, 1.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.06f + 0.40f * (1.0f - lit) * (0.5f + 0.5f * shine)));
+        g.drawLine({inner[k], inner[j]}, 1.0f); // the top's rim catches the light from the other side
+        g.setColour(juce::Colours::white.withAlpha(0.08f));
+        g.drawLine({outer[k], inner[k]}, 0.8f);
+    }
 }
 
 juce::Image renderBackdrop(int width, int height, float scale)
@@ -121,39 +129,52 @@ juce::Image renderBackdrop(int width, int height, float scale)
 
     const auto w = static_cast<float>(width), h = static_cast<float>(height);
 
-    // Base: deep gunmetal, a little lighter where the light comes from.
-    g.setGradientFill(juce::ColourGradient(juce::Colour(0xff15161a), {0.0f, 0.0f}, juce::Colour(0xff07080a), {0.0f, h}, false));
+    // Base: deep gunmetal.
+    g.setGradientFill(juce::ColourGradient(juce::Colour(0xff121316), {0.0f, 0.0f}, juce::Colour(0xff060709), {0.0f, h}, false));
     g.fillAll();
 
-    const Pt hero{w * 0.80f, h * 0.40f};
-    const float heroR = h * 0.50f;
-    g.setGradientFill(juce::ColourGradient(juce::Colour(0x30a9b2c4), hero.translated(-heroR * 0.3f, -heroR * 0.5f),
-                                           juce::Colour(0x00000000), hero.translated(heroR * 1.2f, heroR * 1.2f), true));
-    g.fillAll();
+    // One gem drawn twice into sprites, dull and shining; every tile is a blend
+    // of the two, depending on how close it is to the light.
+    const float radius = juce::jlimit(26.0f, 54.0f, h * 0.055f);
+    const float pitchX = radius * 2.45f, pitchY = radius * 2.15f;
+    const int sprite = juce::roundToInt(radius * 3.2f * scale);
+    const auto makeSprite = [&](float shine) {
+        juce::Image img(juce::Image::ARGB, sprite, sprite, true);
+        juce::Graphics sg(img);
+        sg.addTransform(juce::AffineTransform::scale(scale));
+        const float s = static_cast<float>(sprite) / scale;
+        drawGem(sg, {s * 0.5f, s * 0.5f}, radius, 1.0f, shine);
+        return img;
+    };
+    const auto dull = makeSprite(0.1f);
+    const auto bright = makeSprite(1.0f);
+    const float spriteSize = static_cast<float>(sprite) / scale;
 
-    // Faint hexagonal rings around the large shape.
-    for (const float ring : {1.28f, 1.62f, 2.05f}) {
-        juce::Path hex;
-        for (int i = 0; i < 6; ++i) {
-            const float angle = juce::MathConstants<float>::pi / 3.0f * static_cast<float>(i) - juce::MathConstants<float>::halfPi;
-            const Pt p{hero.x + heroR * ring * std::cos(angle), hero.y + heroR * ring * std::sin(angle)};
-            if (i == 0)
-                hex.startNewSubPath(p);
-            else
-                hex.lineTo(p);
+    const Pt light{w * 0.82f, h * 0.12f};
+    const float reach = std::max(w, h) * 0.75f;
+    int row = 0;
+    for (float y = -pitchY * 0.5f; y < h + pitchY; y += pitchY, ++row) {
+        const float offset = (row % 2 == 0) ? 0.0f : pitchX * 0.5f;
+        for (float x = -pitchX * 0.5f + offset; x < w + pitchX; x += pitchX) {
+            const float d = Pt(x, y).getDistanceFrom(light) / reach;
+            const float shine = std::exp(-d * d * 2.2f);
+            const auto area = juce::Rectangle<float>(spriteSize, spriteSize).withCentre({x, y});
+            g.setOpacity(0.3f + 0.25f * shine);
+            g.drawImage(dull, area);
+            g.setOpacity(0.6f * shine);
+            g.drawImage(bright, area);
         }
-        hex.closeSubPath();
-        g.setColour(juce::Colours::white.withAlpha(0.028f / ring));
-        g.strokePath(hex, juce::PathStrokeType(1.0f));
     }
+    g.setOpacity(1.0f);
 
-    drawCube(g, {w * 0.09f, h * 0.90f}, h * 0.19f, 0.30f, 0.55f, -0.18f);
-    drawCube(g, {w * 0.47f, h * 0.06f}, h * 0.05f, 0.32f, 0.45f, 0.22f);
-    drawCube(g, hero, heroR, 0.30f, 0.92f);
+    // The light itself: a soft glow over the brightest tiles.
+    g.setGradientFill(juce::ColourGradient(juce::Colour(0x22b4bccc), light, juce::Colour(0x00000000), light.translated(reach, reach * 0.5f),
+                                           true));
+    g.fillAll();
 
-    // Vignette.
-    g.setGradientFill(juce::ColourGradient(juce::Colours::transparentBlack, {w * 0.5f, h * 0.45f},
-                                           juce::Colours::black.withAlpha(0.55f), {0.0f, 0.0f}, true));
+    // Vignette, so the edges fall away into darkness.
+    g.setGradientFill(juce::ColourGradient(juce::Colours::transparentBlack, {w * 0.55f, h * 0.42f},
+                                           juce::Colours::black.withAlpha(0.7f), {0.0f, h}, true));
     g.fillAll();
 
     // Fine grain, so the gradients don't band.

@@ -681,7 +681,11 @@ std::string applyWord(Word word, int sign, double amount, const std::string& cla
         } else {
             b.set(param::Lfo1Target, static_cast<double>(target));
             b.set(param::Lfo1Wave, static_cast<double>(dsp::LfoWave::Sine));
-            b.set(param::Lfo1RateHz, word == Word::Vibrato ? 5.5 : (word == Word::Wobble ? 2.0 : 6.0));
+            // "a slow wobble", "fast vibrato".
+            const double pace = hasAny(clause, {"slow", "lazy", "gentle", "gently"}) ? 0.4
+                                : hasAny(clause, {"fast", "quick", "rapid"})      ? 2.2
+                                                                                   : 1.0;
+            b.set(param::Lfo1RateHz, pace * (word == Word::Vibrato ? 5.5 : (word == Word::Wobble ? 2.0 : 6.0)));
             b.set(param::Lfo1Depth, std::min(1.0, (word == Word::Vibrato ? 0.12 : 0.4) * amount));
         }
         return std::string("Added ") + name + ".";

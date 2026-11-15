@@ -51,6 +51,14 @@ struct Session::LlmJob {
     llm::Answer answer;
 };
 
+struct Session::PullJob {
+    std::thread thread;
+    std::atomic<bool> cancel{false}, finished{false};
+    std::atomic<double> done{0.0}, total{0.0};
+    juce::String model;
+    juce::String error;
+};
+
 struct Session::ProbeJob {
     std::thread thread;
     std::atomic<bool> finished{false};
@@ -106,6 +114,11 @@ Session::~Session()
     }
     if (probeJob_ && probeJob_->thread.joinable())
         probeJob_->thread.join();
+    if (pullJob_) {
+        pullJob_->cancel = true;
+        if (pullJob_->thread.joinable())
+            pullJob_->thread.join();
+    }
 }
 
 void Session::add(LogEntry::Kind kind, const juce::String& text, const juce::String& tag)
@@ -477,7 +490,65 @@ bool Session::isPlaying() const { return processor_.isPlayingReference() || proc
 
 // ---------------------------------------------------------------- assistant
 
-int Session::assistantProgress() const { return llmJob_ ? llmJob_->received.load() : 0; }
+juce::String Session::busyText() const
+{
+    if (pullJob_) {
+        const double done = pullJob_->done.load(), total = pullJob_->total.load();
+        if (total <= 0.0)
+            return "Downloading " + pullJob_->model;
+        return "Downloading " + pullJob_->model + ": " + juce::String(juce::roundToInt(100.0 * done / total)) + "% of " +
+               juce::String(total / 1.0e9, 1) + " GB";
+    }
+    if (llmJob_) {
+        const int received = llmJob_->received.load();
+        return "Asking " + llmSettings_.model + (received > 0 ? "   " + juce::String(received) + " characters" : juce::String());
+    }
+    return {};
+}
+
+void Session::startPull(const juce::String& model)
+{
+    if (pullJob_) {
+        add(LogEntry::Kind::Info, "Already downloading " + pullJob_->model + ".");
+        return;
+    }
+    if (!probe_.reachable || !probe_.ollama) {
+        add(LogEntry::Kind::Error, llm::installedApp().exists()
+                                       ? juce::String("Ollama isn't running. Type /start to start it, then /download again.")
+                                       : juce::String("Downloading a model needs Ollama. Install it from ollama.com (or choose "
+                                                      "the AI assistant in the SynthMatch installer), then type /download."));
+        return;
+    }
+    auto job = std::make_unique<PullJob>();
+    job->model = model;
+    auto* j = job.get();
+    const auto settings = llmSettings_;
+    j->thread = std::thread([j, settings] {
+        j->error = llm::pull(settings, j->model, j->cancel, [j](double done, double total) {
+            j->done = done;
+            j->total = total;
+        });
+        j->finished = true;
+    });
+    pullJob_ = std::move(job);
+    add(LogEntry::Kind::Info, "Downloading " + model + " through Ollama. You can keep working; the assistant uses the "
+                                                       "built-in rules until it's done.");
+}
+
+void Session::finishPull()
+{
+    auto job = std::move(pullJob_);
+    if (job->thread.joinable())
+        job->thread.join();
+    if (job->error.isEmpty()) {
+        llmSettings_.model = job->model;
+        add(LogEntry::Kind::Info, "Installed " + job->model + ". The assistant uses it from now on.");
+    } else {
+        add(LogEntry::Kind::Error, "The download didn't finish: " + job->error + ". Type /download to try again.");
+    }
+    modelStatus_ = ModelStatus::Checking;
+    startProbe();
+}
 
 juce::String Session::modelStatusText() const
 {
@@ -544,11 +615,17 @@ void Session::finishProbe()
     else
         modelStatus_ = ModelStatus::Ready;
 
-    if (modelStatus_ == ModelStatus::Missing && !toldAboutModel_) {
+    if (modelStatus_ == ModelStatus::Missing && !toldAboutModel_ && !pullJob_) {
         toldAboutModel_ = true;
-        add(LogEntry::Kind::Info, "Found a model server, but " + llmSettings_.model +
-                                      " isn't installed. To install it, run in a terminal:  ollama pull " +
-                                      llmSettings_.model + "   (or pick another with /model NAME)");
+        add(LogEntry::Kind::Info, probe_.ollama ? "Ollama is running, but " + llmSettings_.model +
+                                                      " isn't installed. Type /download to get it (about 1.4 GB), or pick "
+                                                      "another with /model NAME."
+                                                : "Found a model server, but " + llmSettings_.model +
+                                                      " isn't on it. Pick one it has with /model NAME.");
+    }
+    if (modelStatus_ == ModelStatus::Offline && llm::installedApp().exists() && !toldAboutModel_) {
+        toldAboutModel_ = true;
+        add(LogEntry::Kind::Info, "Ollama is installed but not running. Type /start to start it.");
     }
     sendChangeMessage();
 }
@@ -634,9 +711,11 @@ void Session::submit(const juce::String& rawText)
         }
         if (!reply.complete && llmSettings_.enabled() && modelStatus_ == ModelStatus::Offline && !toldAboutModel_) {
             toldAboutModel_ = true;
-            add(LogEntry::Kind::Info, "That used the built-in rules: no local language model is running. For one, install "
-                                      "Ollama (ollama.com) and run  ollama pull " +
-                                          llmSettings_.model + "  then try again.");
+            add(LogEntry::Kind::Info, llm::installedApp().exists()
+                                          ? juce::String("That used the built-in rules: Ollama isn't running. Type /start to start it.")
+                                          : juce::String("That used the built-in rules: no local language model is installed. "
+                                                         "Choose the AI assistant in the SynthMatch installer, or install "
+                                                         "Ollama from ollama.com and type /download."));
         }
         // Someone may have started the server since the last look.
         if (modelStatus_ != ModelStatus::Ready && juce::Time::currentTimeMillis() - lastProbeMs_ > 10000)
@@ -729,6 +808,8 @@ void Session::runCommand(const juce::String& command)
             "/llm auto       ask the model when the built-in rules don't know every word (default)\n"
             "/llm always     ask the model for everything except exact settings\n"
             "/llm off        built-in rules only\n"
+            "/download       download the model through Ollama (default qwen3:1.7b)\n"
+            "/start          start Ollama if it's installed but not running\n"
             "/status         what the assistant is using\n"
             "/undo  /redo  /clear",
             "rules");
@@ -754,6 +835,21 @@ void Session::runCommand(const juce::String& command)
         add(LogEntry::Kind::Info, "Using model " + argument + ".");
         modelStatus_ = ModelStatus::Checking;
         startProbe();
+    } else if (name == "download" || name == "pull") {
+        startPull(argument.isNotEmpty() ? argument : llmSettings_.model);
+    } else if (name == "start") {
+        const auto app = llm::installedApp();
+        if (!app.exists()) {
+            add(LogEntry::Kind::Error, "Ollama isn't installed. Get it from ollama.com, or choose the AI assistant in the "
+                                       "SynthMatch installer.");
+        } else if (probe_.reachable) {
+            add(LogEntry::Kind::Info, "Ollama is already running.");
+        } else {
+            app.startAsProcess();
+            add(LogEntry::Kind::Info, "Starting Ollama...");
+            probeAtMs_ = juce::Time::currentTimeMillis() + 4000;
+            toldAboutModel_ = false;
+        }
     } else if (name == "server") {
         if (argument.isEmpty()) {
             add(LogEntry::Kind::Reply, "Server: " + llmSettings_.server, "rules");
@@ -879,6 +975,16 @@ void Session::timerCallback()
     }
     if (probeJob_ && probeJob_->finished)
         finishProbe();
+    if (pullJob_) {
+        if (pullJob_->finished)
+            finishPull();
+        else
+            sendChangeMessage(); // progress
+    }
+    if (probeAtMs_ != 0 && juce::Time::currentTimeMillis() >= probeAtMs_) {
+        probeAtMs_ = 0;
+        startProbe();
+    }
 
     const bool playing = isPlaying();
     if (playing != wasPlaying_) {

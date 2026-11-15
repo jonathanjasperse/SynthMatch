@@ -175,6 +175,8 @@ void testRulesVocabulary()
     CHECK(v(vibrato, param::Lfo1Depth) > 0.0f);
     CHECK(v(after("faster vibrato", vibrato), param::Lfo1RateHz) > v(vibrato, param::Lfo1RateHz));
     CHECK(v(after("add a wobble", p), param::Lfo1Target) == static_cast<float>(dsp::LfoTarget::Cutoff));
+    CHECK(v(after("a slow wobble", p), param::Lfo1RateHz) < v(after("add a wobble", p), param::Lfo1RateHz));
+    CHECK(v(after("fast vibrato", p), param::Lfo1RateHz) > v(after("add vibrato", p), param::Lfo1RateHz));
 
     const auto sub = after("add a sub", p);
     CHECK(v(sub, param::Osc3Level) > 0.0f && v(sub, param::Osc3Coarse) == -12.0f);

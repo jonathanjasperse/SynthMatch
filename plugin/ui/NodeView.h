@@ -1,8 +1,8 @@
 #pragma once
 
 // The node view: every part of the synth as a node, wired in signal order.
-// Click a node to edit it in the strip below; drag nodes to arrange them; click
-// a node's light to switch it on or off.
+// Click a node to edit it in the strip below (click empty space for the key
+// controls); drag nodes to arrange them; click a node's light to switch it on or off.
 //
 // The wiring follows the engine's fixed signal path. Nodes can be moved but not
 // re-routed yet.
@@ -48,7 +48,7 @@ private:
     std::vector<Node> nodes_;
     std::unique_ptr<Canvas> canvas_;
     std::unique_ptr<Inspector> inspector_;
-    juce::String selected_ = "filter";
+    juce::String selected_; // empty: the strip shows the key controls
     synthmatch::ParamValues lastParams_{};
 };
 

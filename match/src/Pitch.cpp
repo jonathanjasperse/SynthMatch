@@ -14,9 +14,48 @@ constexpr double kMinHz = 27.5;   // A0
 constexpr double kMaxHz = 4200.0; // just above C8
 constexpr double kFrameSec = 0.010;
 constexpr double kActiveRangeDb = 45.0; // quieter than this below the peak counts as silence
+constexpr std::size_t kNewPitchFrames = 15; // 150 ms at a new pitch makes a new note
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
 double hzToMidi(double hz) { return 69.0 + 12.0 * std::log2(hz / 440.0); }
+
+// Stacked oscillators (a sub-octave, a fifth above) make the pitch tracker
+// flip between readings an octave or a fifth apart. Such a jump, without a
+// new attack, is the same note.
+bool harmonicallyRelated(double semitones)
+{
+    const double a = std::abs(semitones);
+    // Octaves get more slack: vibrato moves both readings, but the tracker
+    // can flip mid-swing.
+    for (const double octave : {12.0, 24.0})
+        if (std::abs(a - octave) < 1.0)
+            return true;
+    for (const double fifth : {5.0, 7.0, 17.0, 19.0})
+        if (std::abs(a - fifth) < 0.5)
+            return true;
+    return false;
+}
+
+// The pitch heard most often, to the nearest semitone.
+double mostCommonNote(const std::vector<double>& pitches)
+{
+    if (pitches.empty())
+        return std::numeric_limits<double>::quiet_NaN();
+    std::vector<int> counts(128, 0);
+    for (const double p : pitches)
+        counts[static_cast<std::size_t>(std::clamp(static_cast<int>(std::lround(p)), 0, 127))]++;
+    const auto best = std::max_element(counts.begin(), counts.end());
+    const int note = static_cast<int>(best - counts.begin());
+    // Refine within that semitone, so slightly detuned notes stay detuned.
+    double sum = 0.0;
+    int n = 0;
+    for (const double p : pitches)
+        if (std::lround(p) == note) {
+            sum += p;
+            ++n;
+        }
+    return sum / n;
+}
 
 double median(std::vector<double> values)
 {
@@ -222,9 +261,27 @@ NoteDetection detectNotes(std::span<const float> mono, double sampleRate, double
         quiet = 0;
 
         if (!std::isnan(smooth[i])) {
-            // A new note when the pitch moves away and stays away (legato playing).
-            if (pitches.size() >= 4 && std::abs(smooth[i] - median(pitches)) > 0.7) {
-                if (++drift >= 4) {
+            // A new note when the pitch moves away from the note's centre and
+            // stays there, steady, for 150 ms (legato playing). Vibrato swings
+            // around the centre and never holds still; an octave or a fifth is
+            // the tracker hesitating between stacked oscillators.
+            const double away = pitches.size() >= 4 ? smooth[i] - median(pitches) : 0.0;
+            const bool related = std::abs(away) > 0.7 && harmonicallyRelated(away);
+            if (!related)
+                pitches.push_back(smooth[i]); // every frame, so vibrato centres itself
+            bool steady = false;
+            if (std::abs(away) > 0.7 && !related && drift + 1 >= kNewPitchFrames) {
+                double lo = smooth[i], hi = smooth[i];
+                for (std::size_t j = i + 1 - kNewPitchFrames; j <= i; ++j)
+                    if (!std::isnan(smooth[j])) {
+                        lo = std::min(lo, smooth[j]);
+                        hi = std::max(hi, smooth[j]);
+                    }
+                steady = hi - lo < 0.8;
+            }
+            if (std::abs(away) > 0.7 && !related) {
+                ++drift;
+                if (drift >= kNewPitchFrames && steady) {
                     const std::size_t boundary = i + 1 - drift;
                     close(boundary > 0 ? boundary - 1 : 0, false);
                     inNote = true;
@@ -236,9 +293,8 @@ NoteDetection detectNotes(std::span<const float> mono, double sampleRate, double
                     drift = 0;
                     noteMaxDb = -200.0;
                 }
-            } else {
+            } else if (!related) {
                 drift = 0;
-                pitches.push_back(smooth[i]);
             }
         }
 
@@ -247,9 +303,13 @@ NoteDetection detectNotes(std::span<const float> mono, double sampleRate, double
             double recentMin = frames[i].levelDb;
             for (std::size_t j = i - 5; j < i; ++j)
                 recentMin = std::min(recentMin, frames[j].levelDb);
-            // Only after the note has clearly dipped; a slow attack is not a new note.
+            // Only after a deep dip, and back up to nearly full level: unison
+            // beating and tremolo wobble the level too, but not like that.
+            double comingPeak = frames[i].levelDb;
+            for (std::size_t j = i; j < std::min(n, i + 5); ++j)
+                comingPeak = std::max(comingPeak, frames[j].levelDb);
             if (frames[i].levelDb - recentMin > 12.0 && frames[i].levelDb > peakDb - 20.0 &&
-                noteMaxDb - recentMin > 9.0) {
+                noteMaxDb - recentMin > 15.0 && comingPeak > noteMaxDb - 6.0) {
                 close(i - 1, true); // the key was released somewhere before the dip
                 inNote = true;
                 current.first = i;
@@ -298,7 +358,7 @@ NoteDetection detectNotes(std::span<const float> mono, double sampleRate, double
         }
 
         Draft d;
-        d.midi = median(notePitches);
+        d.midi = mostCommonNote(notePitches);
         d.levelDb = level;
         if (s == 0) {
             d.startSec = originSec;
@@ -313,7 +373,42 @@ NoteDetection detectNotes(std::span<const float> mono, double sampleRate, double
             d.startSec = frameStartSec(seg.first) + halfWindow; // a change of pitch: the middle of the frame
         }
 
+        // Key-up shows as the level falling much faster than it was before.
+        // (With a long release, or a pluck that has died away, it can't be
+        // seen, and the estimate below is used instead.)
+        std::size_t keyUp = 0;
         if (seg.endsInSilence) {
+            const std::size_t count = levels.size();
+            std::size_t top = 0;
+            for (std::size_t k = 0; k < count; ++k)
+                if (levels[k] > levels[top])
+                    top = k;
+            constexpr std::size_t span = 3; // 30 ms
+            double steepest = 0.0;
+            std::size_t at = 0;
+            // Frames running past the end of the recording fall to silence
+            // because the recording stops, not because a key was released.
+            const std::size_t realFrames =
+                std::min(frames.size(), static_cast<std::size_t>(static_cast<double>(mono.size()) / sampleRate / frameStep));
+            const std::size_t usable = std::min(count, realFrames > seg.first + 6 ? realFrames - seg.first - 6 : 0);
+            for (std::size_t k = top + 2; k + span < usable; ++k) {
+                const double fall = levels[k] - levels[k + span];
+                if (fall > steepest) {
+                    steepest = fall;
+                    at = k;
+                }
+            }
+            if (at > top + 2 && steepest > 6.0) {
+                // How fast it was falling before (its decay towards sustain).
+                const double before = (levels[top] - levels[at]) / static_cast<double>(at - top) * span;
+                if (steepest > 2.5 * std::max(before, 0.5))
+                    keyUp = seg.first + at;
+            }
+        }
+
+        if (keyUp != 0) {
+            d.endSec = frameStartSec(keyUp) + halfWindow;
+        } else if (seg.endsInSilence) {
             // The key was released where the level last sat near its sustained
             // value; after that it is the release tail.
             const std::size_t count = levels.size();

@@ -126,6 +126,59 @@ Probe probe(const Settings& settings)
     return result;
 }
 
+juce::String pull(const Settings& settings, const juce::String& model, const std::atomic<bool>& cancel,
+                  const std::function<void(double, double)>& onProgress)
+{
+    Json body = Json::object();
+    body.set("model", Json(model.toStdString()));
+    body.set("stream", Json(true));
+
+    int status = 0;
+    auto stream = open(trimSlash(settings.server) + "/api/pull", juce::String(body.dump(0)), 30000, status);
+    if (!stream)
+        return "Couldn't reach Ollama at " + trimSlash(settings.server);
+    if (status != 200)
+        return "Ollama answered with an error (HTTP " + juce::String(status) + "): " +
+               stream->readEntireStreamAsString().substring(0, 200);
+
+    // One JSON object per line: {"status": "pulling ...", "completed": n, "total": n}, then {"status": "success"}.
+    // A model is several files; progress is reported for the largest one.
+    double largest = 0.0;
+    while (!stream->isExhausted()) {
+        if (cancel.load())
+            return "Cancelled";
+        const auto line = stream->readNextLine().trim();
+        if (line.isEmpty())
+            continue;
+        const auto chunk = Json::parse(line.toStdString());
+        if (!chunk)
+            continue;
+        if (const Json* error = chunk->find("error"))
+            return juce::String(error->isString() ? error->string() : error->dump(0));
+        const Json* total = chunk->find("total");
+        const Json* done = chunk->find("completed");
+        if (total && total->isNumber() && total->number() >= largest) {
+            largest = total->number();
+            if (onProgress)
+                onProgress(done && done->isNumber() ? done->number() : 0.0, largest);
+        }
+        if (const Json* s = chunk->find("status"); s && s->isString() && s->string() == "success")
+            return {};
+    }
+    return "The download stopped before it finished";
+}
+
+juce::File installedApp()
+{
+#if JUCE_WINDOWS
+    return juce::File::getSpecialLocation(juce::File::windowsLocalAppData).getChildFile("Programs/Ollama/ollama app.exe");
+#elif JUCE_MAC
+    return juce::File("/Applications/Ollama.app");
+#else
+    return {};
+#endif
+}
+
 Answer chat(const Settings& settings, bool ollama, bool noThinking, const std::string& system, const std::string& user,
             const Json& schema, const std::atomic<bool>& cancel, const std::function<void(int)>& onProgress)
 {

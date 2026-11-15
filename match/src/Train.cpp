@@ -422,19 +422,41 @@ TrainResult trainEncoder(const TrainOptions& options)
 
     // 1. Make the training data.
     Dataset data;
-    data.count = options.samples;
+    // Graded real recordings first, then the synthetic notes (the validation
+    // set is taken from the end, so it stays purely synthetic and comparable).
+    const std::size_t repeat = static_cast<std::size_t>(std::max(1, options.extraRepeat));
+    std::size_t extraTotal = 0;
+    for (const auto& e : options.extra)
+        if (e.features.size() == encoderFeatureCount())
+            extraTotal += repeat;
+    data.count = extraTotal + options.samples;
     data.inputs = encoderFeatureCount();
     data.outputs = space.outputSize();
     data.features.resize(data.count * data.inputs);
     data.targets.resize(data.count * data.outputs);
     data.mask.resize(data.count * data.outputs);
 
-    log("Rendering " + std::to_string(data.count) + " training notes on " + std::to_string(threads) + " threads...");
+    if (extraTotal > 0) {
+        std::size_t at = 0;
+        for (const auto& e : options.extra) {
+            if (e.features.size() != encoderFeatureCount())
+                continue;
+            for (std::size_t r = 0; r < repeat; ++r, ++at) {
+                std::copy(e.features.begin(), e.features.end(), data.features.begin() + static_cast<std::ptrdiff_t>(at * data.inputs));
+                makeTargets(space, e.params, data.targets.data() + at * data.outputs, data.mask.data() + at * data.outputs);
+            }
+        }
+        log("Added " + std::to_string(extraTotal / repeat) + " graded recordings (each repeated " + std::to_string(repeat) +
+            " times).");
+    }
+
+    log("Rendering " + std::to_string(options.samples) + " training notes on " + std::to_string(threads) + " threads...");
     std::atomic<std::size_t> done{0};
-    parallelFor(data.count, threads, [&](std::size_t i) {
+    parallelFor(options.samples, threads, [&](std::size_t k) {
         if (cancelled())
             return;
-        const RandomSound sound = randomSound(space, options.seed * 1000003u + static_cast<std::uint32_t>(i));
+        const std::size_t i = extraTotal + k;
+        const RandomSound sound = randomSound(space, options.seed * 1000003u + static_cast<std::uint32_t>(k));
         RenderSettings settings;
         settings.sampleRate = options.sampleRate;
         settings.tailSec = sound.seconds - sound.note.durationSec;
@@ -453,7 +475,7 @@ TrainResult trainEncoder(const TrainOptions& options)
         log(line);
     }
 
-    const auto validation = static_cast<std::size_t>(static_cast<double>(data.count) * options.validationFraction);
+    const auto validation = static_cast<std::size_t>(static_cast<double>(options.samples) * options.validationFraction);
     const std::size_t trainCount = data.count - validation; // the last `validation` examples are held back
     if (trainCount < options.batchSize) {
         log("Not enough samples to train.");

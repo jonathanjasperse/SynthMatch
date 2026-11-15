@@ -25,7 +25,7 @@ SynthMatchEditor::SynthMatchEditor(SynthMatchProcessor& processor)
     addChildComponent(*nodes_);
     addAndMakeVisible(*terminal_);
 
-    for (auto* b : {&add_, &open_, &save_, &edit_, &back_})
+    for (auto* b : {&add_, &open_, &save_, &edit_, &back_, &info_})
         addAndMakeVisible(*b);
     add_.setTooltip("Add a recording to match");
     open_.setTooltip("Open a preset (.json)");
@@ -37,6 +37,13 @@ SynthMatchEditor::SynthMatchEditor(SynthMatchProcessor& processor)
     save_.onClick = [this] { savePreset(); };
     edit_.onClick = [this] { showNodes(true); };
     back_.onClick = [this] { showNodes(false); };
+    info_.setTooltip("About SynthMatch, its licence and source code");
+    info_.onClick = [this] {
+        about_.setVisible(true);
+        about_.toFront(true);
+        about_.grabKeyboardFocus();
+    };
+    addChildComponent(about_);
 
     presetName_.setFont(theme::light(17.0f));
     presetName_.setColour(juce::Label::textColourId, theme::colour::text);
@@ -93,7 +100,7 @@ void SynthMatchEditor::resized()
     auto area = getLocalBounds();
     auto top = area.removeFromTop(kTopBar).reduced(20, 14);
 
-    auto right = top.removeFromRight(330);
+    auto right = top.removeFromRight(372);
     const int editWidth = std::max(edit_.idealWidth(), back_.idealWidth());
     edit_.setBounds(right.removeFromRight(editWidth));
     back_.setBounds(edit_.getBounds());
@@ -103,14 +110,17 @@ void SynthMatchEditor::resized()
     save_.setBounds(right.removeFromRight(right.getHeight()));
     right.removeFromRight(6);
     open_.setBounds(right.removeFromRight(right.getHeight()));
+    right.removeFromRight(6);
+    info_.setBounds(right.removeFromRight(right.getHeight()));
 
-    top.removeFromLeft(206); // the mark and name
+    top.removeFromLeft(212); // the mark and name
     presetName_.setBounds(top.removeFromLeft(std::min(360, top.getWidth())));
 
     terminal_->setBounds(area.removeFromBottom(kTerminal).reduced(20, 0).withTrimmedBottom(16));
     area.removeFromBottom(6);
     main_->setBounds(area);
     nodes_->setBounds(area);
+    about_.setBounds(getLocalBounds());
     backdrop_ = {};
 }
 
@@ -125,12 +135,12 @@ void SynthMatchEditor::paint(juce::Graphics& g)
 
     // Top bar: the mark, the name, and a hairline beneath.
     auto bar = getLocalBounds().removeFromTop(kTopBar).reduced(20, 0);
-    theme::drawMark(g, juce::Rectangle<float>(20.0f, 22.0f).withCentre({static_cast<float>(bar.getX() + 10), static_cast<float>(bar.getCentreY())}));
+    theme::drawMark(g, juce::Rectangle<float>(30.0f, 20.0f).withCentre({static_cast<float>(bar.getX() + 15), static_cast<float>(bar.getCentreY())}));
     g.setFont(theme::caps(13.0f));
     g.setGradientFill(theme::silver(bar.toFloat().withSizeKeepingCentre(static_cast<float>(bar.getWidth()), 16.0f)));
-    g.drawText("SYNTHMATCH", bar.withTrimmedLeft(34).removeFromLeft(150), juce::Justification::centredLeft, false);
+    g.drawText("SYNTHMATCH", bar.withTrimmedLeft(42).removeFromLeft(150), juce::Justification::centredLeft, false);
     g.setColour(juce::Colours::white.withAlpha(0.12f));
-    g.drawVerticalLine(bar.getX() + 188, static_cast<float>(bar.getCentreY() - 10), static_cast<float>(bar.getCentreY() + 10));
+    g.drawVerticalLine(bar.getX() + 194, static_cast<float>(bar.getCentreY() - 10), static_cast<float>(bar.getCentreY() + 10));
 
     juce::ColourGradient hairline(juce::Colours::white.withAlpha(0.0f), 0.0f, 0.0f, juce::Colours::white.withAlpha(0.0f),
                                   static_cast<float>(getWidth()), 0.0f, false);
@@ -258,6 +268,13 @@ void SynthMatchEditor::runSnapshotStep()
     switch (snapshotStep_) {
     case 0:
         shoot("1-main-empty");
+        about_.setVisible(true);
+        about_.toFront(false);
+        snapshotStep_ = 10;
+        break;
+    case 10:
+        shoot("1b-about");
+        about_.setVisible(false);
         snapshotStep_ = 1;
         break;
     case 1: {
@@ -277,29 +294,41 @@ void SynthMatchEditor::runSnapshotStep()
                 shoot("2-main-matching");
             break;
         }
-        session_.submit("make it brighter and add some reverb");
-        session_.submit("it should feel like it's underwater");
+        {
+            // Terminal input to try, separated by semicolons (or a default pair).
+            juce::StringArray commands;
+            commands.addTokens(juce::SystemStats::getEnvironmentVariable("SYNTHMATCH_SNAPSHOT_COMMANDS",
+                                                                         "make it brighter and add some reverb;it should feel like it's underwater"),
+                               ";", "");
+            pendingCommands_ = commands;
+        }
         snapshotStep_ = 3;
         snapshotWait_ = 0;
         break;
     case 3:
-        if (session_.assistantBusy() && ++snapshotWait_ < 240)
+        if (session_.assistantBusy() && ++snapshotWait_ < 480)
             break;
+        if (!pendingCommands_.isEmpty()) {
+            session_.submit(pendingCommands_[0]);
+            pendingCommands_.remove(0);
+            snapshotWait_ = 0;
+            break;
+        }
         shoot("3-main-matched");
         snapshotStep_ = 4;
         break;
     case 4:
         showNodes(true);
-        nodes_->select("delay");
+        nodes_->select({});
         snapshotStep_ = 5;
         break;
     case 5:
         shoot("4-nodes");
-        nodes_->select("filter");
+        nodes_->select("delay");
         snapshotStep_ = 6;
         break;
     case 6:
-        shoot("5-nodes-filter");
+        shoot("5-nodes-delay");
         stopTimer();
         if (juce::JUCEApplicationBase::isStandaloneApp())
             juce::JUCEApplicationBase::quit();

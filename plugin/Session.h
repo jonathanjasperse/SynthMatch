@@ -99,8 +99,8 @@ public:
     };
     const std::vector<LogEntry>& log() const { return log_; }
     void submit(const juce::String& text);
-    bool assistantBusy() const { return llmJob_ != nullptr; }
-    int assistantProgress() const; // characters of the model's answer received so far
+    bool assistantBusy() const { return llmJob_ != nullptr || pullJob_ != nullptr; }
+    juce::String busyText() const; // what the assistant is doing, for the terminal
 
     enum class ModelStatus { Checking, Ready, Missing, Offline, Disabled };
     ModelStatus modelStatus() const { return modelStatus_; }
@@ -118,6 +118,7 @@ private:
     struct MatchJob;
     struct LlmJob;
     struct ProbeJob;
+    struct PullJob;
 
     void timerCallback() override;
     void setPresetNoUndo(const synthmatch::Preset& preset);
@@ -125,6 +126,8 @@ private:
     void finishMatch();
     void finishLlm();
     void finishProbe();
+    void finishPull();
+    void startPull(const juce::String& model);
     void startProbe();
     static void computeSpectra(MatchSummary& summary, const synthmatch::Preset& preset,
                                const std::shared_ptr<const synthmatch::StereoBuffer>& audio);
@@ -156,6 +159,8 @@ private:
     std::vector<LogEntry> log_;
     std::unique_ptr<LlmJob> llmJob_;
     std::unique_ptr<ProbeJob> probeJob_;
+    std::unique_ptr<PullJob> pullJob_;
+    juce::int64 probeAtMs_ = 0; // look for the model server again at this time (0: no need)
     llm::Settings llmSettings_;
     llm::Probe probe_;
     ModelStatus modelStatus_ = ModelStatus::Checking;

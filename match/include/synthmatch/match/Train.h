@@ -29,6 +29,18 @@ struct TrainOptions {
     int threads = 0;                  // 0 = one per CPU core
     std::uint32_t seed = 1;
     double sampleRate = 24000.0;      // the rate the matcher searches at
+
+    // Real recordings with an approved answer: the encoder's input for the
+    // recording (from encoderInputFor) and the preset that matched it well,
+    // as graded by a person. Each is repeated `extraRepeat` times, because
+    // there are few of them and they are worth more than synthetic examples.
+    struct Example {
+        std::vector<float> features;
+        ParamValues params;
+    };
+    std::vector<Example> extra;
+    int extraRepeat = 20;
+
     std::function<void(const std::string&)> log;
     const std::atomic<bool>* cancel = nullptr;
 };

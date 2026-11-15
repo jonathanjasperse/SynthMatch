@@ -1,2 +1,4 @@
 *.f32 binary
 *.smm binary
+*.sh text eol=lf
+packaging/macos/assistant-scripts/* text eol=lf

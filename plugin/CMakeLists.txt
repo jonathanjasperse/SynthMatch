@@ -45,6 +45,8 @@ target_sources(SynthMatch PRIVATE
     ui/Backdrop.cpp
     ui/Backdrop.h
     ui/Terminal.cpp
+    ui/About.cpp
+    ui/About.h
     ui/Terminal.h
     ui/MainView.cpp
     ui/MainView.h

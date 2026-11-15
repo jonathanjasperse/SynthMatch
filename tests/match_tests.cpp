@@ -593,6 +593,27 @@ void testTrainingAndModelFile()
     if (loaded)
         CHECK(loaded->predict(mono, audio.sampleRate, sound.note) == guess);
 
+    // A recording's encoder input, prepared as matching prepares it, can be
+    // added to training as a graded example.
+    const auto input = encoderInputFor(audio);
+    CHECK(input.size() == encoderFeatureCount());
+    TrainOptions withGraded = options;
+    withGraded.samples = 300;
+    withGraded.epochs = 1;
+    withGraded.extra.push_back({input, sound.params});
+    withGraded.extraRepeat = 5;
+    lines.clear();
+    CHECK(trainEncoder(withGraded).ok);
+    bool mentioned = false;
+    for (const auto& line : lines)
+        mentioned = mentioned || line.find("1 graded recording") != std::string::npos;
+    CHECK(mentioned);
+    StereoBuffer silence;
+    silence.sampleRate = 48000.0;
+    silence.left.assign(24000, 0.0f);
+    silence.right = silence.left;
+    CHECK(encoderInputFor(silence).empty());
+
     // The matcher accepts the model for its starting guess.
     MatchOptions match;
     match.budget = 600;

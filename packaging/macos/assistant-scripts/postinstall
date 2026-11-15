@@ -1,0 +1,41 @@
+#!/bin/bash
+# Part of the SynthMatch installer's "AI assistant" choice. Runs as root.
+#
+# Installs Ollama into /Applications if it isn't there, starts it as the person
+# installing, and downloads the assistant's language model in the background.
+# Never fails the installation: the plugin works without the model.
+
+MODEL="qwen3:1.7b"
+OLLAMA_APP="/Applications/Ollama.app"
+OLLAMA_CLI="$OLLAMA_APP/Contents/Resources/ollama"
+LOG="/tmp/synthmatch-assistant-install.log"
+
+exec >>"$LOG" 2>&1
+echo "$(date): SynthMatch assistant setup"
+
+if [ ! -d "$OLLAMA_APP" ]; then
+    TMP="$(mktemp -d)"
+    if curl -fsSL --retry 3 -o "$TMP/Ollama-darwin.zip" "https://ollama.com/download/Ollama-darwin.zip"; then
+        ditto -x -k "$TMP/Ollama-darwin.zip" /Applications || echo "could not unpack Ollama"
+    else
+        echo "could not download Ollama"
+    fi
+    rm -rf "$TMP"
+fi
+
+[ -x "$OLLAMA_CLI" ] || { echo "Ollama is not installed; skipping the model"; exit 0; }
+
+# The person at the screen, not root.
+USER_NAME="$(stat -f %Su /dev/console)"
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ]; then
+    echo "no one is logged in; skipping the model"
+    exit 0
+fi
+
+sudo -u "$USER_NAME" open -g -a "$OLLAMA_APP" || true
+sudo -u "$USER_NAME" nohup /bin/bash -c "
+    for i in \$(seq 90); do curl -s http://127.0.0.1:11434/api/version >/dev/null && break; sleep 1; done
+    '$OLLAMA_CLI' pull '$MODEL'
+" >>"$LOG" 2>&1 &
+
+exit 0

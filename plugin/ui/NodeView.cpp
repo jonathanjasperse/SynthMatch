@@ -131,6 +131,7 @@ public:
             owner_.select(it->key);
             return;
         }
+        owner_.select({}); // empty space: back to the key controls
     }
 
     void mouseDrag(const juce::MouseEvent& e) override
@@ -311,8 +312,9 @@ private:
         juce::Path body;
         body.addRoundedRectangle(r, 9.0f);
         juce::DropShadow(juce::Colours::black.withAlpha(0.6f), 14, {0, 5}).drawForPath(g, body);
-        g.setGradientFill(juce::ColourGradient(juce::Colour(selected ? 0xff2d2f34 : (hover ? 0xff27292d : 0xff222327)), r.getTopLeft(),
-                                               juce::Colour(0xff141518), r.getBottomLeft(), false));
+        // Dark cards, so they stand clear of the metal behind them.
+        g.setGradientFill(juce::ColourGradient(juce::Colour(selected ? 0xff1b1c20 : (hover ? 0xff16171a : 0xff111215)), r.getTopLeft(),
+                                               juce::Colour(0xff07080a), r.getBottomLeft(), false));
         g.fillPath(body);
         g.setGradientFill(juce::ColourGradient(juce::Colours::white.withAlpha(selected ? 0.55f : 0.18f), r.getTopLeft(),
                                                juce::Colours::white.withAlpha(selected ? 0.12f : 0.03f), r.getBottomLeft(), false));
@@ -498,6 +500,18 @@ public:
         controls_.clear();
         node_ = node;
         if (!node) {
+            // The settings reached for most, from across the synth.
+            const std::pair<int, const char*> keys[] = {
+                {p::FilterCutoffHz, "Cutoff"}, {p::FilterResonance, "Resonance"}, {p::AmpAttackMs, "Attack"},
+                {p::AmpReleaseMs, "Release"},  {p::UnisonDetune, "Detune"},       {p::DelayMix, "Delay"},
+                {p::ReverbMix, "Reverb"},      {p::MatchEqAmount, "Match EQ"},    {p::GainDb, "Volume"},
+            };
+            for (const auto& [index, name] : keys) {
+                auto c = std::make_unique<theme::Knob>(owner_.processor_.parameter(index), index, name);
+                addAndMakeVisible(*c);
+                controls_.push_back(std::move(c));
+            }
+            resized();
             repaint();
             return;
         }
@@ -535,16 +549,15 @@ public:
     void paint(juce::Graphics& g) override
     {
         theme::drawPanel(g, getLocalBounds().toFloat(), 14.0f, 0.82f);
-        if (!node_)
-            return;
         auto area = getLocalBounds().reduced(20, 16).removeFromLeft(kTitleWidth - 16);
+        const juce::String title = node_ ? node_->title.substring(0, 1) + node_->title.substring(1).toLowerCase() : "Key controls";
+        const juce::String about = node_ ? node_->about : "The settings you'll reach for most. Click a node to edit everything in it.";
         g.setFont(theme::light(22.0f));
         g.setColour(theme::colour::textHi);
-        g.drawText(node_->title.substring(0, 1) + node_->title.substring(1).toLowerCase(), area.removeFromTop(30),
-                   juce::Justification::topLeft, true);
+        g.drawText(title, area.removeFromTop(30), juce::Justification::topLeft, true);
         g.setFont(theme::sans(12.0f));
         g.setColour(theme::colour::textDim);
-        g.drawFittedText(node_->about, area.removeFromTop(64), juce::Justification::topLeft, 4, 1.0f);
+        g.drawFittedText(about, area.removeFromTop(64), juce::Justification::topLeft, 4, 1.0f);
     }
 
 private:
@@ -593,9 +606,11 @@ NodeView::~NodeView()
 void NodeView::select(const juce::String& key)
 {
     selected_ = key;
+    const Node* found = nullptr;
     for (const auto& n : nodes_)
         if (n.key == key)
-            inspector_->show(&n);
+            found = &n;
+    inspector_->show(found);
     canvas_->repaint();
 }
 

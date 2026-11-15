@@ -1,6 +1,7 @@
 #pragma once
 
-// The main screen: the reference recording, the match, and a few key knobs.
+// The main screen: the reference recording and the match. (The knobs live in
+// the node view, behind Edit.)
 
 #include "ui/Theme.h"
 
@@ -17,7 +18,7 @@ namespace ui {
 // A pill button with a small drawn icon.
 class IconButton : public juce::Button {
 public:
-    enum class Icon { None, Play, Stop, Plus, Refresh, Open, Save, Back, Nodes };
+    enum class Icon { None, Play, Stop, Plus, Refresh, Open, Save, Back, Nodes, Info };
 
     IconButton(const juce::String& text, Icon icon);
     void setIcon(Icon icon) { icon_ = icon; repaint(); }
@@ -54,7 +55,7 @@ private:
 
     SynthMatchProcessor& processor_;
     Session& session_;
-    juce::Rectangle<float> leftCard_, rightCard_, knobCard_;
+    juce::Rectangle<float> leftCard_, rightCard_;
     bool dragHover_ = false;
 
     IconButton playReference_{"Reference", IconButton::Icon::Play};
@@ -62,7 +63,6 @@ private:
     IconButton matchAgain_{"Match again", IconButton::Icon::Refresh};
     IconButton stop_{"Stop", IconButton::Icon::Stop};
     IconButton choose_{"Choose a file", IconButton::Icon::Plus};
-    std::vector<std::unique_ptr<theme::Knob>> knobs_;
 };
 
 } // namespace ui

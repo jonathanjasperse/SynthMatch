@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.22)
 # Must be set before project().
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 
-project(SynthMatch VERSION 0.1.0 LANGUAGES C CXX)
+project(SynthMatch VERSION 0.2.0 LANGUAGES C CXX)
 
 option(SYNTHMATCH_BUILD_PLUGIN "Build the JUCE plugin (downloads JUCE)" ON)
 option(SYNTHMATCH_BUILD_TESTS "Build the tests" ON)
@@ -22,6 +22,7 @@ add_subdirectory(tools/render)
 add_subdirectory(tools/match)
 add_subdirectory(tools/train)
 add_subdirectory(tools/edit)
+add_subdirectory(tools/batch)
 
 if(SYNTHMATCH_BUILD_TESTS)
     enable_testing()
@@ -37,4 +38,5 @@ if(SYNTHMATCH_BUILD_PLUGIN)
     FetchContent_MakeAvailable(JUCE)
 
     add_subdirectory(plugin)
+    add_subdirectory(tools/host)
 endif()

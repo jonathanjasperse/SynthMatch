@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SynthMatch grading</title>
+<style>
+  :root {
+    --bg: #0a0b0d; --panel: #15161a; --panel-hi: #1d1e23; --line: #2a2c31; --line-hi: #3c3f45;
+    --text-hi: #eceef1; --text: #bfc2c7; --dim: #8a8e95; --faint: #5a5e65;
+    --silver: linear-gradient(180deg, #f3f4f6 0%, #d5d8dd 45%, #a9aeb6 55%, #8f949c 100%);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; color: var(--text); background: radial-gradient(1200px 700px at 80% 0%, #1a1b20, var(--bg));
+    font: 14px/1.5 "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
+  }
+  header { display: flex; align-items: center; gap: 18px; padding: 18px 28px; border-bottom: 1px solid #ffffff14; }
+  .mark { font-weight: 600; letter-spacing: .18em; font-size: 12px; background: var(--silver); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .batch { color: var(--text-hi); font-weight: 300; font-size: 17px; }
+  .stats { margin-left: auto; display: flex; gap: 22px; color: var(--dim); font-size: 12.5px; }
+  .stats b { color: var(--text-hi); font-weight: 500; }
+  main { max-width: 980px; margin: 0 auto; padding: 26px 28px 40px; }
+  .card { background: linear-gradient(180deg, #1a1b1fcc, #0f1012cc); border: 1px solid #ffffff17; border-radius: 14px; padding: 22px; box-shadow: 0 10px 30px #0008; }
+  .title { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; }
+  .title .id { font-size: 30px; font-weight: 300; color: var(--text-hi); }
+  .title .notes { color: var(--text); }
+  .title .source { color: var(--faint); font-size: 12px; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
+  .caps { font-size: 10.5px; letter-spacing: .16em; color: var(--dim); text-transform: uppercase; font-weight: 600; }
+  button {
+    font: inherit; color: var(--text); cursor: pointer; border-radius: 999px; padding: 9px 18px;
+    border: 1px solid #ffffff26; background: linear-gradient(180deg, #24262a, #16171a);
+  }
+  button:hover { color: var(--text-hi); border-color: #ffffff45; }
+  button.on { background: linear-gradient(180deg, #3d4046, #25272b); color: var(--text-hi); border-color: #ffffff55; }
+  .ref { display: flex; align-items: center; gap: 16px; padding: 16px; border-radius: 12px; background: #0c0d0f; border: 1px solid #ffffff10; margin-bottom: 18px; }
+  .play { width: 46px; height: 46px; padding: 0; display: grid; place-items: center; flex: none; }
+  .play svg { width: 16px; height: 16px; fill: currentColor; }
+  .cands { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .cand { border-radius: 12px; padding: 16px; background: #111215; border: 1px solid #ffffff12; position: relative; }
+  .cand.picked { border-color: #e9ebeec0; box-shadow: 0 0 0 1px #e9ebee50, 0 0 22px #ffffff12; }
+  .cand .head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  .cand .letter { font-size: 22px; font-weight: 300; color: var(--text-hi); }
+  .cand .key { color: var(--faint); font-size: 12px; }
+  .cand .score { margin-left: auto; color: var(--faint); font-size: 12px; }
+  .rate { display: flex; gap: 6px; }
+  .rate button { flex: 1; padding: 7px 0; border-radius: 8px; }
+  .labels { display: flex; justify-content: space-between; color: var(--faint); font-size: 11px; margin-top: 6px; }
+  .row { display: flex; align-items: center; gap: 12px; margin-top: 18px; flex-wrap: wrap; }
+  .row input { flex: 1; min-width: 200px; background: #0c0d0f; border: 1px solid #ffffff17; border-radius: 10px; color: var(--text-hi); padding: 9px 12px; font: inherit; }
+  .nav { margin-left: auto; display: flex; gap: 8px; }
+  .dots { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 22px; }
+  .dot { width: 22px; height: 22px; border-radius: 6px; border: 1px solid #ffffff1c; background: #111215; cursor: pointer; font-size: 10px; color: var(--faint); display: grid; place-items: center; }
+  .dot.done { background: linear-gradient(180deg, #c9cdd3, #7d828a); color: #111; border-color: transparent; }
+  .dot.none { background: #2a2c31; color: var(--dim); }
+  .dot.here { outline: 1px solid #f3f4f6; outline-offset: 2px; }
+  .help { color: var(--faint); font-size: 12px; margin-top: 18px; line-height: 1.9; }
+  kbd { font: 11px Consolas, Menlo, monospace; color: var(--text); border: 1px solid var(--line-hi); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; }
+  .saved { color: var(--faint); font-size: 12px; }
+  .empty { text-align: center; padding: 80px 0; color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <span class="mark">SYNTHMATCH</span>
+  <span class="batch" id="batch">Loading</span>
+  <div class="stats">
+    <span>Graded <b id="graded">0</b> of <b id="total">0</b></span>
+    <span title="How often the candidate you picked is also the one the matcher scored best">Matcher agrees <b id="agree">-</b></span>
+    <span title="Average closeness of your picks">Average <b id="avg">-</b></span>
+  </div>
+</header>
+<main id="main"><div class="empty">Loading the batch...</div></main>
+
+<script>
+const LETTERS = "ABCDEF", PLAY_KEYS = "asdfgh";
+const PLAY = '<svg viewBox="0 0 16 16"><path d="M4 2l10 6-10 6z"/></svg>';
+const STOP = '<svg viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg>';
+const RATINGS = ["Different sound", "Same family", "Close-ish", "Close", "Can't tell apart"];
+
+let batch = null, grades = {}, index = 0, lastPlayed = null, playing = null, saveTimer = null;
+const audio = new Audio();
+audio.addEventListener("ended", () => { playing = null; render(); });
+
+async function load() {
+  batch = await (await fetch("/api/batch")).json();
+  grades = batch.grades || {};
+  document.getElementById("batch").textContent = batch.name;
+  // Start at the first item without a grade.
+  index = Math.max(0, batch.items.findIndex(it => !grades[it.id]));
+  if (index < 0) index = 0;
+  render();
+}
+
+function save() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    await fetch("/api/grades", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(grades) });
+    const s = document.getElementById("saved");
+    if (s) s.textContent = "Saved";
+  }, 150);
+  updateStats();
+}
+
+function play(what) {
+  const item = batch.items[index];
+  const src = what === "ref" ? item.reference : item.candidates[what].audio;
+  if (playing === what) { audio.pause(); playing = null; render(); return; }
+  audio.src = "/files/" + src;
+  audio.currentTime = 0;
+  audio.play();
+  playing = what;
+  if (what !== "ref") lastPlayed = what;
+  render();
+}
+
+function rate(cand, value) {
+  const id = batch.items[index].id;
+  const note = (grades[id] && grades[id].note) || "";
+  grades[id] = { best: cand, closeness: value, note, time: new Date().toISOString() };
+  save();
+  render();
+}
+
+function none() {
+  const id = batch.items[index].id;
+  grades[id] = { best: null, closeness: 1, note: (grades[id] && grades[id].note) || "", time: new Date().toISOString() };
+  save();
+  render();
+}
+
+function go(to) {
+  if (!batch || to < 0 || to >= batch.items.length) return;
+  audio.pause(); playing = null; lastPlayed = null; index = to; render();
+}
+
+function updateStats() {
+  const items = batch.items;
+  const done = items.filter(it => grades[it.id]);
+  document.getElementById("graded").textContent = done.length;
+  document.getElementById("total").textContent = items.length;
+  const picks = done.filter(it => grades[it.id].best !== null);
+  if (picks.length) {
+    const agree = picks.filter(it => {
+      const best = it.candidates.reduce((b, c, i, a) => (c.distance < a[b].distance ? i : b), 0);
+      return best === grades[it.id].best;
+    }).length;
+    document.getElementById("agree").textContent = Math.round(100 * agree / picks.length) + "%";
+    const avg = picks.reduce((s, it) => s + grades[it.id].closeness, 0) / picks.length;
+    document.getElementById("avg").textContent = avg.toFixed(1);
+  }
+}
+
+function render() {
+  if (!batch) return;
+  if (!batch.items.length) { document.getElementById("main").innerHTML = '<div class="empty">This batch has no items.</div>'; return; }
+  const item = batch.items[index];
+  const g = grades[item.id];
+  const source = item.source.split(/[\\/]/).pop();
+  let html = `<div class="card">
+    <div class="title"><span class="id">${item.id}</span><span class="notes">${item.notes}</span>
+      <span class="source" title="${item.source}">${source}</span></div>
+    <div class="ref"><button class="play ${playing === "ref" ? "on" : ""}" onclick="play('ref')">${playing === "ref" ? STOP : PLAY}</button>
+      <div><div class="caps">Reference</div><div style="color:var(--dim)">Listen first. <kbd>Space</kbd></div></div></div>
+    <div class="caps" style="margin-bottom:10px">Candidates: rate the one that's closest</div>
+    <div class="cands">`;
+  item.candidates.forEach((c, i) => {
+    const picked = g && g.best === i;
+    html += `<div class="cand ${picked ? "picked" : ""}">
+      <div class="head"><button class="play ${playing === i ? "on" : ""}" onclick="play(${i})">${playing === i ? STOP : PLAY}</button>
+        <span class="letter">${LETTERS[i]}</span><span class="key"><kbd>${PLAY_KEYS[i].toUpperCase()}</kbd></span>
+        <span class="score">${g ? "matcher: " + c.score + "/100" : ""}</span></div>
+      <div class="rate">${[1, 2, 3, 4, 5].map(v => `<button class="${picked && g.closeness === v ? "on" : ""}" onclick="rate(${i}, ${v})">${v}</button>`).join("")}</div>
+      <div class="labels"><span>${RATINGS[0]}</span><span>${RATINGS[4]}</span></div></div>`;
+  });
+  html += `</div>
+    <div class="row">
+      <button class="${g && g.best === null ? "on" : ""}" onclick="none()">None are close <kbd>N</kbd></button>
+      <input id="note" placeholder="A note for yourself (optional): what's off?" value="${(g && g.note) ? g.note.replace(/"/g, "&quot;") : ""}">
+      <span class="saved" id="saved"></span>
+      <div class="nav"><button onclick="go(index - 1)">&larr; Back</button><button onclick="go(index + 1)">Next &rarr;</button></div>
+    </div>
+    <div class="dots">${batch.items.map((it, i) => {
+      const gi = grades[it.id];
+      const cls = gi ? (gi.best === null ? "none" : "done") : "";
+      return `<div class="dot ${cls} ${i === index ? "here" : ""}" onclick="go(${i})" title="${it.id} ${it.notes}">${gi && gi.best !== null ? gi.closeness : ""}</div>`;
+    }).join("")}</div>
+    <div class="help"><kbd>Space</kbd> reference &nbsp; <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> play a candidate &nbsp;
+      <kbd>1</kbd>-<kbd>5</kbd> rate the candidate you played last (that makes it your pick) &nbsp;
+      <kbd>N</kbd> none are close &nbsp; <kbd>&rarr;</kbd> next &nbsp; <kbd>&larr;</kbd> back<br>
+      Ratings: ${RATINGS.map((r, i) => `<b>${i + 1}</b> ${r}`).join(" &middot; ")}.
+      Matcher scores appear after you've graded, so they don't sway you.</div>
+  </div>`;
+  document.getElementById("main").innerHTML = html;
+  const note = document.getElementById("note");
+  note.addEventListener("input", () => {
+    if (!grades[item.id]) return; // a note goes with a grade
+    grades[item.id].note = note.value;
+    save();
+  });
+  updateStats();
+}
+
+document.addEventListener("keydown", e => {
+  if (!batch || e.target.tagName === "INPUT" || e.ctrlKey || e.metaKey || e.altKey) return;
+  const item = batch.items[index];
+  const k = e.key.toLowerCase();
+  if (k === " ") { e.preventDefault(); play("ref"); }
+  else if (PLAY_KEYS.includes(k) && PLAY_KEYS.indexOf(k) < item.candidates.length) play(PLAY_KEYS.indexOf(k));
+  else if ("12345".includes(k) && k !== "") {
+    if (lastPlayed === null) return;
+    rate(lastPlayed, Number(k));
+  }
+  else if (k === "n") none();
+  else if (k === "arrowright" || k === "enter") go(index + 1);
+  else if (k === "arrowleft") go(index - 1);
+});
+
+load();
+</script>
+</body>
+</html>

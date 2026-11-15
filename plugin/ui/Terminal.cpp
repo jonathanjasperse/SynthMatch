@@ -171,10 +171,7 @@ void Terminal::refresh()
     const auto entries = session_.log().size();
     if (entries != shownEntries_ || busy != wasBusy_ || busy) {
         const bool atBottom = viewport_.getViewPositionY() + viewport_.getViewHeight() >= log_->getHeight() - 30;
-        const int received = session_.assistantProgress();
-        juce::String busyText = "Asking " + session_.llmSettings().model + juce::String::repeatedString(".", 1 + dots_ % 3);
-        if (received > 0)
-            busyText += "   " + juce::String(received) + " characters";
+        const auto busyText = session_.busyText() + juce::String::repeatedString(".", 1 + dots_ % 3);
         log_->rebuild(std::max(100, viewport_.getMaximumVisibleWidth()), busy, busyText);
         if (atBottom || entries != shownEntries_)
             viewport_.setViewPosition(0, std::max(0, log_->getHeight() - viewport_.getViewHeight()));

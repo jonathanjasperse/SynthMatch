@@ -2,6 +2,7 @@
 
 #include "ui/MainView.h"
 #include "ui/NodeView.h"
+#include "ui/About.h"
 #include "ui/Terminal.h"
 #include "ui/Theme.h"
 
@@ -50,11 +51,13 @@ private:
     ui::IconButton save_{"", ui::IconButton::Icon::Save};
     ui::IconButton edit_{"Edit", ui::IconButton::Icon::Nodes};
     ui::IconButton back_{"Back", ui::IconButton::Icon::Back};
+    ui::IconButton info_{"", ui::IconButton::Icon::Info};
     juce::Label presetName_;
 
     std::unique_ptr<ui::MainView> main_;
     std::unique_ptr<ui::NodeView> nodes_;
     std::unique_ptr<ui::Terminal> terminal_;
+    ui::About about_;
     std::unique_ptr<juce::FileChooser> chooser_;
     juce::TooltipWindow tooltips_{this, 700};
 
@@ -63,6 +66,7 @@ private:
     juce::File snapshotDir_;
     int snapshotStep_ = -1;
     int snapshotWait_ = 0;
+    juce::StringArray pendingCommands_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SynthMatchEditor)
 };

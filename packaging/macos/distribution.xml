@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>SynthMatch</title>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <options customize="always" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <domains enable_localSystem="true"/>
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="11.0"/>
+        </allowed-os-versions>
+    </volume-check>
+
+    <choices-outline>
+        <line choice="vst3"/>
+        <line choice="au"/>
+        <line choice="app"/>
+        <line choice="assistant"/>
+    </choices-outline>
+
+    <choice id="vst3" title="VST3 plugin" description="For Ableton Live, Cubase, Bitwig, Reaper, Studio One and most other hosts.">
+        <pkg-ref id="com.bedrotaudio.synthmatch.vst3"/>
+    </choice>
+    <choice id="au" title="Audio Unit" description="For Logic Pro, GarageBand and other Audio Unit hosts.">
+        <pkg-ref id="com.bedrotaudio.synthmatch.au"/>
+    </choice>
+    <choice id="app" title="Standalone app" description="SynthMatch on its own, without a host.">
+        <pkg-ref id="com.bedrotaudio.synthmatch.app"/>
+    </choice>
+    <choice id="assistant" title="AI assistant (Ollama and qwen3:1.7b)"
+            description="Downloads Ollama from ollama.com (if it isn't installed) and a 1.4 GB language model, so the assistant terminal understands any request. Optional: without it the assistant uses its built-in rules.">
+        <pkg-ref id="com.bedrotaudio.synthmatch.assistant"/>
+    </choice>
+
+    <pkg-ref id="com.bedrotaudio.synthmatch.vst3" version="@VERSION@">synthmatch-vst3.pkg</pkg-ref>
+    <pkg-ref id="com.bedrotaudio.synthmatch.au" version="@VERSION@">synthmatch-au.pkg</pkg-ref>
+    <pkg-ref id="com.bedrotaudio.synthmatch.app" version="@VERSION@">synthmatch-app.pkg</pkg-ref>
+    <pkg-ref id="com.bedrotaudio.synthmatch.assistant" version="@VERSION@">synthmatch-assistant.pkg</pkg-ref>
+</installer-gui-script>

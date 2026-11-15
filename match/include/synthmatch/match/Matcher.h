@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -71,5 +72,10 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
 // The distance between a recording and a preset playing the given notes, as
 // the matcher measures it. Useful for tests and for checking a result.
 double presetDistance(const StereoBuffer& reference, const Preset& preset, std::span<const NoteEvent> notes);
+
+// The encoder's input for a recording, prepared exactly as matchSound prepares
+// it: the first note found, at the sample rate the search runs at. Empty when
+// no note is found. Used to train on real recordings (see Train.h).
+std::vector<float> encoderInputFor(const StereoBuffer& recording, double maxSeconds = 4.0);
 
 } // namespace synthmatch::match

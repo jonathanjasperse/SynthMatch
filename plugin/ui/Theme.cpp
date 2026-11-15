@@ -69,25 +69,34 @@ void drawPanel(juce::Graphics& g, juce::Rectangle<float> area, float radius, flo
 
 void drawMark(juce::Graphics& g, juce::Rectangle<float> area)
 {
-    // A faceted gem: a rhombus cut into four planes of polished metal.
-    const auto c = area.getCentre();
-    const float w = area.getWidth() * 0.5f, h = area.getHeight() * 0.5f;
-    const juce::Point<float> top{c.x, c.y - h}, right{c.x + w, c.y}, bottom{c.x, c.y + h}, left{c.x - w, c.y};
-    const juce::Point<float> mid{c.x, c.y - h * 0.15f};
+    // A polished metal waveform: a short wave packet that swells and fades.
+    juce::Path wave;
+    const int steps = 64;
+    for (int i = 0; i <= steps; ++i) {
+        const float t = static_cast<float>(i) / steps;
+        // max(0, ...): sin(pi) comes out a hair below zero, and pow of that is NaN.
+        const float envelope = std::pow(std::max(0.0f, std::sin(juce::MathConstants<float>::pi * t)), 0.7f);
+        const float v = std::sin(juce::MathConstants<float>::twoPi * 2.5f * t) * envelope;
+        const juce::Point<float> p{area.getX() + area.getWidth() * t, area.getCentreY() - area.getHeight() * 0.42f * v};
+        i == 0 ? wave.startNewSubPath(p) : wave.lineTo(p);
+    }
+    const float thickness = std::max(2.0f, area.getHeight() * 0.15f);
+    const juce::PathStrokeType stroke(thickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded);
 
-    const auto facet = [&](juce::Point<float> a, juce::Point<float> b, juce::Point<float> d, juce::Colour from, juce::Colour to) {
-        juce::Path p;
-        p.startNewSubPath(a);
-        p.lineTo(b);
-        p.lineTo(d);
-        p.closeSubPath();
-        g.setGradientFill(juce::ColourGradient(from, a, to, d, false));
-        g.fillPath(p);
-    };
-    facet(top, left, mid, juce::Colour(0xffe9ebee), juce::Colour(0xff8c9198));
-    facet(top, right, mid, juce::Colour(0xffb9bdc3), juce::Colour(0xff50545b));
-    facet(left, bottom, mid, juce::Colour(0xff6c7077), juce::Colour(0xff26282c));
-    facet(right, bottom, mid, juce::Colour(0xff3a3d42), juce::Colour(0xff121315));
+    // A shadow beneath, the metal body, then a thin highlight along its top edge.
+    g.setColour(juce::Colours::black.withAlpha(0.7f));
+    g.strokePath(wave, stroke, juce::AffineTransform::translation(0.0f, 1.2f));
+
+    juce::ColourGradient body(juce::Colour(0xfff4f5f7), area.getTopLeft(), juce::Colour(0xff5c6168), area.getBottomLeft(), false);
+    body.addColour(0.42, juce::Colour(0xffc9cdd3));
+    body.addColour(0.55, juce::Colour(0xff7d828a));
+    body.addColour(0.7, juce::Colour(0xffaeb3ba));
+    g.setGradientFill(body);
+    g.strokePath(wave, stroke);
+
+    g.setColour(juce::Colours::white.withAlpha(0.55f));
+    g.strokePath(wave, juce::PathStrokeType(thickness * 0.28f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded),
+                 juce::AffineTransform::translation(0.0f, -thickness * 0.22f));
 }
 
 // ---------------------------------------------------------------- look and feel

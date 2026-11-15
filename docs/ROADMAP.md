@@ -43,13 +43,15 @@ CLI, tests, and CI on Windows, macOS and Linux (no plugin on Linux).
 - [x] Presets as readable JSON grouped by node; partial files work; the render
   tool reads and writes them.
 - [x] Main view: drop or choose a recording, match progress, score, waveform,
-  spectrum comparison, reference and synth playback, key knobs.
-- [x] The look: dark gunmetal with glossy metal polyhedra in the background.
+  spectrum comparison, reference and synth playback.
+- [x] The look: dark gunmetal tiled with glossy metal pentagons, a metal
+  waveform as the mark.
 
 ### Stage 3: Node mode (done for a fixed signal path)
 - [x] Edit button to a node view and Back to the main view.
 - [x] Nodes for the 3 oscillators, noise, mixer, filter, amp, 2 LFOs, EQ, delay,
-  reverb, match EQ and output, wired in signal order, with an inspector strip.
+  reverb, match EQ and output, wired in signal order, with an inspector strip
+  that shows the key controls when no node is selected.
 - [x] Delay with many settings (time or tempo sync, feedback, ping-pong, spread,
   low and high cut in the feedback, modulation), reverb (feedback delay
   network), 4-band EQ.
@@ -69,7 +71,12 @@ dimensions that renders candidates through the real engine on all cores but one.
 Done in C++ rather than Python, so the plugin runs the same code.
 
 - [x] a sound made by the synth is found again from its own render (tested)
+- [x] search from the best three distinct starting points, then a final polish
+- [x] note detection that isn't fooled by vibrato, stacked oscillators an octave
+  or a fifth apart, unison beating or reverb tails
 - [ ] better results on sounds the synth can't make exactly, and on chords
+- [ ] the octave of a sound with a strong sub-oscillator is ambiguous; the
+  matcher picks the lower one
 
 ### Stage 6: ML encoder (done, first version)
 A neural network (multi-layer perceptron) that maps a summary of a note
@@ -80,6 +87,11 @@ plugin. No GPU, no Python, no ML runtime.
 - [x] trainer, model file, loader that refuses a mismatched model
 - [x] trained model: choices right 69% of the time, continuous settings off by
   15% of their range (a blind guess is off by about 25%)
+- [x] learning from other synths and your ears: render references from VST3
+  synths you own (`synthmatch_host`), batch-match them, grade the matches in the
+  browser (`tools/grade`), and train on the approved ones (`--graded`)
+- [ ] use the grades to tune the matcher's distance so its favourite agrees
+  with yours
 - [ ] make it improve the final match, not just the start: more data, a bigger
   model, or a spectrogram CNN
 
@@ -87,7 +99,7 @@ plugin. No GPU, no Python, no ML runtime.
 Source separation (a Demucs-class model through ONNX Runtime), run offline on a
 background thread, plus manual cleanup: region select, band-pass, mid/side solo.
 
-### Stage 8: Installers (not started)
+### Stage 8: Installers (scripts done, first release pending)
 One command builds release installers into `dist/` (which is not committed):
 
 - **Windows:** `dist/SynthMatch-<version>-Windows.exe`, built with Inno Setup.
@@ -103,6 +115,14 @@ One command builds release installers into `dist/` (which is not committed):
   notarization on macOS (needs a paid Apple Developer account). Unsigned
   installers work for testing but show security warnings.
 
+- [x] Inno Setup script, macOS pkgbuild/productbuild script, one-step scripts
+- [x] optional "AI assistant" part: installs Ollama from ollama.com and starts
+  the model download; `/download` and `/start` in the plugin as the fallback
+- [x] Release workflow: builds both on a version tag, drafts a GitHub release;
+  signs and notarizes on macOS when the secrets are set
+- [ ] first real run of the installers (needs Inno Setup locally, or the
+  workflow), and a test install on a clean machine
+- [ ] code signing, and a public place to download from
 ### Stage 9: Assistant terminal (done)
 - [x] A terminal along the bottom of the window: type a change, see exactly what
   changed, undo it.

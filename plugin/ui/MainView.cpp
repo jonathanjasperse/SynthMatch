@@ -105,6 +105,11 @@ void IconButton::drawIcon(juce::Graphics& g, Icon icon, juce::Rectangle<float> a
         p.cubicTo(c.x, c.y + s * 0.2f, c.x, c.y - s * 0.2f, c.x + s * 0.13f, c.y - s * 0.2f);
         g.strokePath(p, juce::PathStrokeType(1.2f));
         break;
+    case Icon::Info:
+        g.drawEllipse(juce::Rectangle<float>(s * 0.8f, s * 0.8f).withCentre(c), 1.3f);
+        g.fillEllipse(juce::Rectangle<float>(s * 0.12f, s * 0.12f).withCentre({c.x, c.y - s * 0.18f}));
+        g.drawLine(c.x, c.y - s * 0.04f, c.x, c.y + s * 0.24f, 1.5f);
+        break;
     case Icon::None:
         break;
     }
@@ -161,18 +166,6 @@ MainView::MainView(SynthMatchProcessor& processor, Session& session) : processor
     matchAgain_.setTooltip("Search again, from a different starting point");
     stop_.setTooltip("Stop searching and keep the closest sound so far");
 
-    const std::pair<int, const char*> knobs[] = {
-        {synthmatch::param::FilterCutoffHz, "Cutoff"},  {synthmatch::param::FilterResonance, "Resonance"},
-        {synthmatch::param::AmpAttackMs, "Attack"},     {synthmatch::param::AmpReleaseMs, "Release"},
-        {synthmatch::param::UnisonDetune, "Detune"},    {synthmatch::param::DelayMix, "Delay"},
-        {synthmatch::param::ReverbMix, "Reverb"},       {synthmatch::param::MatchEqAmount, "Match EQ"},
-        {synthmatch::param::GainDb, "Volume"},
-    };
-    for (const auto& [index, label] : knobs) {
-        knobs_.push_back(std::make_unique<theme::Knob>(processor_.parameter(index), index, label));
-        addAndMakeVisible(*knobs_.back());
-    }
-
     session_.addChangeListener(this);
     updateButtons();
 }
@@ -210,18 +203,10 @@ void MainView::updateButtons()
 void MainView::resized()
 {
     auto area = getLocalBounds().reduced(20, 8);
-    knobCard_ = area.removeFromBottom(108).toFloat();
-    area.removeFromBottom(14);
     const int rightWidth = juce::jlimit(280, 380, area.getWidth() * 34 / 100);
     rightCard_ = area.removeFromRight(rightWidth).toFloat();
     area.removeFromRight(14);
     leftCard_ = area.toFloat();
-
-    // Knobs, evenly spaced.
-    auto row = knobCard_.toNearestInt().reduced(16, 10);
-    const int each = row.getWidth() / static_cast<int>(knobs_.size());
-    for (auto& k : knobs_)
-        k->setBounds(row.removeFromLeft(each).withSizeKeepingCentre(std::min(each, 84), row.getHeight()));
 
     // Buttons along the bottom of the score card.
     auto buttons = rightCard_.toNearestInt().reduced(20, 18).removeFromBottom(34);
@@ -246,7 +231,6 @@ void MainView::paint(juce::Graphics& g)
 {
     theme::drawPanel(g, leftCard_, 14.0f, dragHover_ ? 0.85f : 0.58f);
     theme::drawPanel(g, rightCard_, 14.0f, 0.5f);
-    theme::drawPanel(g, knobCard_, 14.0f, 0.55f);
 
     if (dragHover_) {
         juce::Path outline;
@@ -268,7 +252,7 @@ void MainView::paint(juce::Graphics& g)
 void MainView::paintEmpty(juce::Graphics& g, juce::Rectangle<float> area)
 {
     const auto c = area.getCentre().translated(0.0f, -38.0f);
-    theme::drawCube(g, c, 34.0f, 0.3f, 0.95f);
+    theme::drawGem(g, c, 36.0f, 1.0f, 0.9f);
 
     g.setColour(theme::colour::textHi);
     g.setFont(theme::light(24.0f));

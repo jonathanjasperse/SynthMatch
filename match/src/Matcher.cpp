@@ -218,12 +218,15 @@ public:
 
     void start(const std::vector<std::vector<double>>& candidates) { evaluate(candidates); }
 
-    // CMA-ES over the chosen dimensions, starting from the best point so far.
-    // `spread` is the starting step for each dimension, as a fraction of its range.
+    // CMA-ES over the chosen dimensions, starting from `from` (or the best
+    // point so far). `spread` is the starting step for each dimension, as a
+    // fraction of its range. The other dimensions keep their values from `from`.
     void runStage(const std::vector<std::size_t>& dims, const std::vector<double>& spread, int stageBudget,
-                  std::uint32_t seed)
+                  std::uint32_t seed, std::vector<double> from = {})
     {
-        if (dims.empty() || stageBudget <= 0 || best_.empty())
+        if (from.empty())
+            from = best_;
+        if (dims.empty() || stageBudget <= 0 || from.empty())
             return;
 
         const std::size_t n = dims.size();
@@ -235,14 +238,14 @@ public:
         // The optimizer works in units of each dimension's own step size.
         std::vector<double> mean(n);
         for (std::size_t k = 0; k < n; ++k)
-            mean[k] = best_[dims[k]] / spread[k];
+            mean[k] = from[dims[k]] / spread[k];
         CmaEs cma(std::move(mean), 1.0, population, seed);
 
-        std::vector<std::vector<double>> points(population, best_);
+        const std::vector<double>& anchor = from; // the dimensions not in this stage stay put
+        std::vector<std::vector<double>> points(population, anchor);
         std::vector<double> fitness(population);
         for (int g = 0; g < generations && !cancelled(); ++g) {
             const auto& asked = cma.ask();
-            const std::vector<double> anchor = best_; // the dimensions not in this stage stay put
             std::vector<double> penalty(population, 0.0);
             for (std::size_t i = 0; i < population; ++i) {
                 points[i] = anchor;
@@ -261,6 +264,69 @@ public:
             cma.tell(fitness);
             if (cma.sigma() < 1.0e-3)
                 break; // converged
+        }
+    }
+
+    // A final pattern search: nudge each continuous setting a little up and
+    // down from the best point, keep what helps, then try all the helpful
+    // nudges together. Repeated with smaller steps. CMA-ES finds the right
+    // region; this settles the details.
+    void polish(const std::vector<std::size_t>& dims, int polishBudget)
+    {
+        std::vector<std::size_t> continuous;
+        for (const std::size_t d : dims)
+            if (!space_.dims[d].isChoice())
+                continuous.push_back(d);
+        const int stop = evaluations_ + polishBudget;
+
+        for (const double step : {0.04, 0.015, 0.005}) {
+            for (int round = 0; round < 2 && !cancelled() && evaluations_ < stop && !best_.empty(); ++round) {
+                const auto base = best_;
+                const double baseDistance = bestDistance_;
+                std::vector<std::vector<double>> points;
+                std::vector<std::pair<std::size_t, double>> moves;
+                for (const std::size_t d : continuous) {
+                    for (const double s : {-step, step}) {
+                        auto p = base;
+                        p[d] = std::clamp(p[d] + s, 0.0, 1.0);
+                        if (p[d] != base[d]) {
+                            moves.push_back({d, p[d]});
+                            points.push_back(std::move(p));
+                        }
+                    }
+                }
+                const auto distances = evaluate(points);
+
+                // The better direction for each setting that improved.
+                std::vector<std::pair<std::size_t, double>> helpful;
+                std::vector<double> gain;
+                for (std::size_t i = 0; i < moves.size(); ++i) {
+                    if (distances[i] >= baseDistance)
+                        continue;
+                    bool replaced = false;
+                    for (std::size_t h = 0; h < helpful.size(); ++h) {
+                        if (helpful[h].first == moves[i].first) {
+                            if (baseDistance - distances[i] > gain[h]) {
+                                helpful[h] = moves[i];
+                                gain[h] = baseDistance - distances[i];
+                            }
+                            replaced = true;
+                        }
+                    }
+                    if (!replaced) {
+                        helpful.push_back(moves[i]);
+                        gain.push_back(baseDistance - distances[i]);
+                    }
+                }
+                if (helpful.empty())
+                    break; // nothing to gain at this step size
+                if (helpful.size() > 1) {
+                    auto combined = base;
+                    for (const auto& [d, v] : helpful)
+                        combined[d] = v;
+                    evaluate({combined});
+                }
+            }
         }
     }
 
@@ -419,19 +485,50 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
     result.usedEncoder = startDistances.size() > encoderIndex &&
                          startDistances[encoderIndex] <= *std::min_element(startDistances.begin(), startDistances.end());
 
-    // Stage 1: the core sound. Stage 2: everything, with the core only fine-tuned.
+    // The best few starting points that differ from each other (another
+    // waveform, or clearly different settings), so the search explores more
+    // than one family of sounds.
+    std::vector<std::size_t> order(starts.size());
+    for (std::size_t i = 0; i < order.size(); ++i)
+        order[i] = i;
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return startDistances[a] < startDistances[b]; });
+    const auto waveDim = static_cast<std::size_t>(0); // osc1_wave is the first dimension
+    std::vector<std::size_t> picked;
+    for (const std::size_t i : order) {
+        bool distinct = true;
+        for (const std::size_t j : picked) {
+            double diff = 0.0;
+            for (std::size_t d = 0; d < space.dims.size(); ++d)
+                diff += std::abs(starts[i][d] - starts[j][d]);
+            const bool sameWave = space.dims[waveDim].choiceIndex(space.dims[waveDim].toValue(starts[i][waveDim])) ==
+                                  space.dims[waveDim].choiceIndex(space.dims[waveDim].toValue(starts[j][waveDim]));
+            distinct = distinct && (!sameWave || diff / static_cast<double>(space.dims.size()) > 0.1);
+        }
+        if (distinct)
+            picked.push_back(i);
+        if (picked.size() == 3)
+            break;
+    }
+
+    // Stage 1: the core sound, from each of those starts, most effort on the
+    // most promising. Stage 2: everything, from the best so far, with the core
+    // only fine-tuned. Then a final polish.
     const int remaining = std::max(0, options.budget - state.evaluations());
     const auto core = state.dims(false), all = state.dims(true);
-
-    state.runStage(core, std::vector<double>(core.size(), 0.25), static_cast<int>(0.5 * remaining), options.seed);
+    const double shares[] = {0.24, 0.14, 0.10};
+    for (std::size_t k = 0; k < picked.size(); ++k)
+        state.runStage(core, std::vector<double>(core.size(), 0.25), static_cast<int>(shares[k] * remaining),
+                       options.seed + 7u * static_cast<std::uint32_t>(k), starts[picked[k]]);
     state.sweepChoices(core);
 
     std::vector<double> spread(all.size());
     for (std::size_t k = 0; k < all.size(); ++k)
         spread[k] = space.dims[all[k]].extended ? 0.25 : 0.08;
     state.sweepChoices(all);
-    state.runStage(all, spread, std::max(0, options.budget - state.evaluations() - 60), options.seed + 1);
+    const int polishBudget = static_cast<int>(0.1 * remaining);
+    state.runStage(all, spread, std::max(0, options.budget - state.evaluations() - polishBudget - 60), options.seed + 1);
     state.sweepChoices(all);
+    state.polish(all, std::max(0, options.budget - state.evaluations()));
 
     if (state.best().empty()) {
         result.error = "The search didn't produce a result.";
@@ -469,6 +566,27 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
     result.ok = true;
     progress(1.0, result.distance, "Done");
     return result;
+}
+
+std::vector<float> encoderInputFor(const StereoBuffer& recording, double maxSeconds)
+{
+    double rate = 0.0;
+    std::string error;
+    const auto mono = matchedSection(recording, rate, error);
+    if (mono.empty())
+        return {};
+    const auto detection = detectNotes(mono, rate, maxSeconds);
+    if (detection.notes.empty())
+        return {};
+    std::vector<float> section(mono.begin() + static_cast<std::ptrdiff_t>(detection.startSample),
+                               mono.begin() + static_cast<std::ptrdiff_t>(detection.startSample + detection.numSamples));
+    // The same steps as in matchSound: halve the rate when the search does.
+    if (rate >= 44100.0) {
+        section = decimateBy2(section);
+        rate /= 2.0;
+    }
+    const double firstNoteEnd = detection.notes.size() > 1 ? detection.notes[1].startSec : -1.0;
+    return encoderFeatures(section, rate, detection.notes.front(), firstNoteEnd);
 }
 
 double presetDistance(const StereoBuffer& reference, const Preset& preset, std::span<const NoteEvent> notes)

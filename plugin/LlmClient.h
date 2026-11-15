@@ -65,4 +65,12 @@ Answer chat(const Settings& settings, bool ollama, bool noThinking, const std::s
             const synthmatch::Json& schema, const std::atomic<bool>& cancel,
             const std::function<void(int)>& onProgress = {});
 
+// Asks an Ollama server to download a model. `onProgress` gets the bytes done
+// and the total (0 while unknown). Returns an empty string on success, or why not.
+juce::String pull(const Settings& settings, const juce::String& model, const std::atomic<bool>& cancel,
+                  const std::function<void(double done, double total)>& onProgress);
+
+// Where Ollama is normally installed, or a nonexistent file.
+juce::File installedApp();
+
 } // namespace llm
