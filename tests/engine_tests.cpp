@@ -5,9 +5,13 @@
 
 #include "synthmatch/Engine.h"
 #include "synthmatch/Params.h"
+#include "synthmatch/Json.h"
+#include "synthmatch/Preset.h"
 #include "synthmatch/Render.h"
 #include "synthmatch/dsp/Envelope.h"
+#include "synthmatch/dsp/Biquad.h"
 #include "synthmatch/dsp/Filter.h"
+#include "synthmatch/dsp/MatchEq.h"
 #include "synthmatch/dsp/Oscillator.h"
 
 #include <algorithm>
@@ -231,7 +235,20 @@ void testSchema()
     CHECK(findParam("noise_level") == param::NoiseLevel);
     CHECK(findParam("filter_type") == param::FilterType);
     CHECK(findParam("filter_release_ms") == param::FilterReleaseMs);
-    CHECK(kNumParams == 30);
+    CHECK(findParam("matcheq_amount") == param::MatchEqAmount);
+    CHECK(findParam("lfo2_depth") == param::lfo(1, param::LfoDepth));
+    CHECK(kNumParams == 72);
+
+    // Every parameter belongs to a node, and node + field leads back to it.
+    CHECK(nodeOf(param::FilterCutoffHz) == "filter");
+    CHECK(fieldOf(param::FilterCutoffHz) == "cutoff_hz");
+    CHECK(nodeOf(param::GainDb) == "master");
+    CHECK(fieldOf(param::GainDb) == "gain_db");
+    CHECK(nodeOf(param::AmpAttackMs) == "amp");
+    CHECK(findParam("reverb", "mix") == param::ReverbMix);
+    CHECK(!findParam("reverb", "banana"));
+    for (int i = 0; i < kNumParams; ++i)
+        CHECK(findParam(nodeOf(i), fieldOf(i)) == i);
     CHECK(!findParam("does_not_exist"));
 
     const auto& wave = spec(param::Osc1Wave);
@@ -752,9 +769,21 @@ void testBlockSizeIndependence()
     p[param::FilterEnvAmount] = 4.0f;
     p[param::FilterDecayMs] = 120.0f;
     p[param::FilterSustain] = 0.2f;
+    p[param::UnisonVoices] = 3.0f;
+    p[param::Lfo1Target] = static_cast<float>(dsp::LfoTarget::Pitch);
+    p[param::Lfo1Depth] = 0.2f;
+    p[param::Lfo2Target] = static_cast<float>(dsp::LfoTarget::Cutoff);
+    p[param::Lfo2Wave] = static_cast<float>(dsp::LfoWave::Random);
+    p[param::Lfo2RateHz] = 20.0f;
+    p[param::EqOn] = 1.0f;
+    p[param::EqLowGainDb] = 3.0f;
+    p[param::DelayOn] = 1.0f;
+    p[param::DelayTimeMs] = 70.0f;
+    p[param::DelayModDepth] = 0.5f;
+    p[param::ReverbOn] = 1.0f;
 
     const NoteEvent notes[] = {{0.0, 0.2, 48, 0.9f}, {0.0501, 0.2, 55, 0.7f}, {0.13, 0.1, 64, 0.8f}};
-    std::vector<float> reference;
+    std::vector<float> reference, referenceRight;
     for (const int blockSize : {256, 1, 32, 1000}) {
         RenderSettings settings;
         settings.blockSize = blockSize;
@@ -762,9 +791,11 @@ void testBlockSizeIndependence()
         const auto audio = render(p, notes, settings);
         if (reference.empty()) {
             reference = audio.left;
+            referenceRight = audio.right;
             CHECK(peak(reference, 0, reference.size()) > 0.05f);
         }
         CHECK(audio.left == reference);
+        CHECK(audio.right == referenceRight);
     }
 }
 
@@ -802,12 +833,579 @@ void testFilterStability()
     }
 }
 
+// ---------------------------------------------------------------- unison, LFOs, pitch bend
+
+double rms(const std::vector<float>& x, std::size_t from, std::size_t to)
+{
+    to = std::min(to, x.size());
+    double sum = 0.0;
+    for (std::size_t i = from; i < to; ++i)
+        sum += static_cast<double>(x[i]) * x[i];
+    return to > from ? std::sqrt(sum / static_cast<double>(to - from)) : 0.0;
+}
+
+std::vector<double> slice(const std::vector<float>& x, double fromSec, double toSec, double sampleRate)
+{
+    return std::vector<double>(x.begin() + static_cast<std::ptrdiff_t>(at(fromSec, sampleRate)),
+                               x.begin() + static_cast<std::ptrdiff_t>(at(toSec, sampleRate)));
+}
+
+void testUnison()
+{
+    const double sr = 48000.0;
+    const std::size_t from = at(0.2, sr), to = at(1.0, sr);
+    const auto power = [&](const StereoBuffer& a) {
+        const double l = rms(a.left, from, to), r = rms(a.right, from, to);
+        return l * l + r * r;
+    };
+
+    // One voice: both channels are identical.
+    auto p = sawPatch();
+    const auto mono = renderNote(p, 57, 1.0, 0.0, sr);
+    CHECK(mono.left == mono.right);
+
+    // Five detuned copies spread across the stereo field.
+    p[param::UnisonVoices] = 5.0f;
+    p[param::UnisonDetune] = 30.0f;
+    p[param::UnisonSpread] = 1.0f;
+    const auto wide = renderNote(p, 57, 1.0, 0.0, sr);
+    CHECK(wide.left != wide.right);
+    CHECK_NEAR(toDb(power(wide) / power(mono)), 0.0, 2.0); // about as loud as one voice
+
+    // No spread: still mono, however many copies.
+    p[param::UnisonSpread] = 0.0f;
+    const auto narrow = renderNote(p, 57, 1.0, 0.0, sr);
+    CHECK(narrow.left == narrow.right);
+
+    // Two sine copies, 100 cents either side of the note.
+    auto s = sinePatch();
+    s[param::UnisonVoices] = 2.0f;
+    s[param::UnisonDetune] = 100.0f;
+    s[param::UnisonSpread] = 0.0f;
+    const auto pair = renderNote(s, 69, 1.5, 0.0, sr);
+    const auto steady = slice(pair.left, 0.25, 1.25, sr);
+    CHECK_NEAR(amplitudeAt(steady, 440.0 * std::pow(2.0, -100.0 / 1200.0) / sr), std::sqrt(0.5), 0.02);
+    CHECK_NEAR(amplitudeAt(steady, 440.0 * std::pow(2.0, 100.0 / 1200.0) / sr), std::sqrt(0.5), 0.02);
+    CHECK(amplitudeAt(steady, 440.0 / sr) < 0.02);
+}
+
+void testLfo()
+{
+    const double sr = 48000.0;
+
+    // Vibrato: depth 0.5 is +/- 12 * 0.25 = 3 semitones. A 5 Hz sine peaks at
+    // 0.05 s and bottoms out at 0.15 s.
+    auto p = sinePatch();
+    p[param::Lfo1Target] = static_cast<float>(dsp::LfoTarget::Pitch);
+    p[param::Lfo1RateHz] = 5.0f;
+    p[param::Lfo1Depth] = 0.5f;
+    const auto vibrato = renderNote(p, 69, 0.5, 0.0, sr);
+    CHECK_NEAR(estimateHz(vibrato.left, sr, at(0.045, sr), at(0.055, sr)), 440.0 * std::pow(2.0, 3.0 / 12.0), 8.0);
+    CHECK_NEAR(estimateHz(vibrato.left, sr, at(0.145, sr), at(0.155, sr)), 440.0 * std::pow(2.0, -3.0 / 12.0), 8.0);
+
+    // Tremolo: a 2 Hz square at full depth switches the note on and off.
+    p = sinePatch();
+    p[param::Lfo2Target] = static_cast<float>(dsp::LfoTarget::Amp);
+    p[param::Lfo2Wave] = static_cast<float>(dsp::LfoWave::Square);
+    p[param::Lfo2RateHz] = 2.0f;
+    p[param::Lfo2Depth] = 1.0f;
+    const auto tremolo = renderNote(p, 69, 0.6, 0.0, sr);
+    CHECK_NEAR(peak(tremolo.left, at(0.05, sr), at(0.2, sr)), 1.0, 0.01);
+    CHECK(peak(tremolo.left, at(0.3, sr), at(0.45, sr)) < 1.0e-6f);
+
+    // Filter wobble: a 1 Hz square at depth 0.5 moves the cutoff +/- 2 octaves.
+    p = sawPatch();
+    p[param::FilterCutoffHz] = 1000.0f;
+    p[param::Lfo1Target] = static_cast<float>(dsp::LfoTarget::Cutoff);
+    p[param::Lfo1Wave] = static_cast<float>(dsp::LfoWave::Square);
+    p[param::Lfo1RateHz] = 1.0f;
+    p[param::Lfo1Depth] = 0.5f;
+    const auto wobble = renderNote(p, 57, 1.0, 0.0, sr);
+    const double open = harmonicIn(wobble, 0.2, 0.4, 2200.0);
+    const double closed = harmonicIn(wobble, 0.7, 0.9, 2200.0);
+    CHECK(open > 20.0 * closed);
+    CHECK_NEAR(open, amplitudeAt(runOsc(Wave::Saw, 220.0 / sr, 9600), 2200.0 / sr) *
+                         svfGain(FilterType::LowPass, sr, 4000.0, std::sqrt(2.0), 2200.0),
+               0.002);
+
+    // Pulse width: a square wave has no even harmonics until the LFO moves its width.
+    p = sawPatch();
+    p[param::Osc1Wave] = static_cast<float>(Wave::Square);
+    const auto square = renderNote(p, 57, 0.5, 0.0, sr);
+    CHECK(harmonicIn(square, 0.1, 0.4, 440.0) < 1.0e-3);
+    p[param::Lfo1Target] = static_cast<float>(dsp::LfoTarget::PulseWidth);
+    p[param::Lfo1Wave] = static_cast<float>(dsp::LfoWave::Square);
+    p[param::Lfo1RateHz] = 1.0f;
+    p[param::Lfo1Depth] = 0.5f;
+    const auto pulse = renderNote(p, 57, 0.5, 0.0, sr);
+    CHECK(harmonicIn(pulse, 0.1, 0.4, 440.0) > 0.1);
+
+    // A target of "off" or a depth of 0 changes nothing.
+    p = sawPatch();
+    const auto plain = renderNote(p, 57, 0.3, 0.1, sr);
+    p[param::Lfo1Depth] = 1.0f;
+    p[param::Lfo2Target] = static_cast<float>(dsp::LfoTarget::Pitch);
+    p[param::Lfo2Depth] = 0.0f;
+    CHECK(renderNote(p, 57, 0.3, 0.1, sr).left == plain.left);
+}
+
+void testPitchBend()
+{
+    const double sr = 48000.0;
+    const auto bentHz = [&](float bend, float range) {
+        Engine engine;
+        engine.prepare(sr);
+        auto p = sinePatch();
+        p[param::BendRange] = range;
+        engine.setParams(p);
+        engine.setPitchBend(bend);
+        engine.noteOn(69, 1.0f);
+        std::vector<float> left(at(0.5, sr)), right(left.size());
+        engine.process(left.data(), right.data(), static_cast<int>(left.size()));
+        return estimateHz(left, sr, at(0.1, sr), at(0.4, sr));
+    };
+
+    CHECK_NEAR(bentHz(0.0f, 2.0f), 440.0, 0.05);
+    CHECK_NEAR(bentHz(1.0f, 2.0f), 440.0 * std::pow(2.0, 2.0 / 12.0), 0.1);
+    CHECK_NEAR(bentHz(-1.0f, 12.0f), 220.0, 0.05);
+    CHECK_NEAR(bentHz(0.5f, 12.0f), 440.0 * std::pow(2.0, 6.0 / 12.0), 0.1);
+}
+
+// ---------------------------------------------------------------- effects
+
+// Level of a held sine note at its own frequency, in dB relative to full scale.
+double sineLevelDb(const ParamValues& p, int note, const MatchEqGains* matchEq = nullptr)
+{
+    const double sr = 48000.0;
+    Preset preset;
+    preset.params = p;
+    if (matchEq)
+        preset.matchEq = *matchEq;
+    const NoteEvent events[] = {{0.0, 1.0, note, 1.0f}};
+    RenderSettings settings;
+    settings.sampleRate = sr;
+    settings.tailSec = 0.0;
+    const auto audio = render(preset, events, settings);
+    // A whole number of cycles is not guaranteed here, so use a long window.
+    const double a = amplitudeAt(slice(audio.left, 0.4, 0.9, sr), noteHz(note) / sr);
+    return 20.0 * std::log10(a);
+}
+
+void testEqNode()
+{
+    const double sr = 48000.0;
+    auto flat = sinePatch();
+    auto p = flat;
+    p[param::EqOn] = 1.0f;
+
+    // Switched on with every gain at zero, the EQ changes nothing.
+    const auto a = renderNote(flat, 57, 0.3, 0.0, sr);
+    const auto b = renderNote(p, 57, 0.3, 0.0, sr);
+    float worst = 0.0f;
+    for (std::size_t i = 0; i < a.left.size(); ++i)
+        worst = std::max(worst, std::abs(a.left[i] - b.left[i]));
+    CHECK(worst < 1.0e-6f);
+
+    // Each band changes the level at a test note by what its formula predicts.
+    p[param::EqLowFreqHz] = 300.0f;
+    p[param::EqLowGainDb] = 12.0f;
+    CHECK_NEAR(sineLevelDb(p, 45) - sineLevelDb(flat, 45),
+               dsp::BiquadCoeffs::lowShelf(sr, 300.0, 12.0).gainDbAt(110.0, sr), 0.05);
+    CHECK_NEAR(sineLevelDb(p, 45) - sineLevelDb(flat, 45), 12.0, 1.0); // well inside the shelf
+    CHECK_NEAR(sineLevelDb(p, 105) - sineLevelDb(flat, 105), 0.0, 0.1); // far above it
+
+    p = flat;
+    p[param::EqOn] = 1.0f;
+    p[param::EqMid1FreqHz] = 440.0f;
+    p[param::EqMid1GainDb] = -9.0f;
+    p[param::EqMid1Q] = 2.0f;
+    CHECK_NEAR(sineLevelDb(p, 69) - sineLevelDb(flat, 69), -9.0, 0.05);
+
+    p = flat;
+    p[param::EqOn] = 1.0f;
+    p[param::EqHighFreqHz] = 2000.0f;
+    p[param::EqHighGainDb] = 6.0f;
+    CHECK_NEAR(sineLevelDb(p, 105) - sineLevelDb(flat, 105),
+               dsp::BiquadCoeffs::highShelf(sr, 2000.0, 6.0).gainDbAt(noteHz(105), sr), 0.05);
+    CHECK_NEAR(sineLevelDb(p, 105) - sineLevelDb(flat, 105), 6.0, 0.6);
+}
+
+// A 10 ms blip, for hearing echoes and reverb tails.
+ParamValues blipPatch()
+{
+    auto p = sinePatch();
+    p[param::AmpAttackMs] = 0.1f;
+    p[param::AmpDecayMs] = 10.0f;
+    p[param::AmpSustain] = 0.0f;
+    return p;
+}
+
+void testDelay()
+{
+    const double sr = 48000.0;
+    const auto echo = [&](const std::vector<float>& x, double sec) { return peak(x, at(sec - 0.002, sr), at(sec + 0.02, sr)); };
+    const auto run = [&](const ParamValues& p, double tempo = 120.0) {
+        const NoteEvent events[] = {{0.0, 0.02, 81, 1.0f}};
+        RenderSettings settings;
+        settings.sampleRate = sr;
+        settings.tailSec = 0.8;
+        settings.tempoBpm = tempo;
+        return render(p, events, settings);
+    };
+
+    auto p = blipPatch();
+    const auto dry = run(p);
+    const float blip = peak(dry.left, 0, at(0.02, sr));
+    CHECK(blip > 0.5f);
+    CHECK(peak(dry.left, at(0.05, sr), dry.numFrames()) == 0.0f);
+
+    // Echoes every 100 ms, each half as loud as the one before.
+    p[param::DelayOn] = 1.0f;
+    p[param::DelayTimeMs] = 100.0f;
+    p[param::DelayFeedback] = 0.5f;
+    p[param::DelayMix] = 0.5f; // dry and wet both at full level
+    const auto wet = run(p);
+    CHECK_NEAR(peak(wet.left, 0, at(0.02, sr)), blip, 1e-6);
+    CHECK_NEAR(echo(wet.left, 0.1), blip, 0.03 * blip);
+    CHECK_NEAR(echo(wet.left, 0.2), 0.5 * blip, 0.03 * blip);
+    CHECK_NEAR(echo(wet.left, 0.3), 0.25 * blip, 0.03 * blip);
+    CHECK(peak(wet.left, at(0.03, sr), at(0.095, sr)) < 1.0e-3f); // silence between echoes
+    CHECK(wet.left == wet.right);
+
+    // A mix of 0 is the dry signal exactly.
+    p[param::DelayMix] = 0.0f;
+    CHECK(run(p).left == dry.left);
+
+    // Ping-pong: left, right, left, ...
+    p[param::DelayMix] = 0.5f;
+    p[param::DelayMode] = 1.0f;
+    const auto pong = run(p);
+    CHECK_NEAR(echo(pong.left, 0.1), blip, 0.03 * blip);
+    CHECK(echo(pong.right, 0.1) < 1.0e-3f);
+    // Later echoes have been through the feedback filters twice or more, which
+    // takes a few percent off such a short blip.
+    CHECK_NEAR(echo(pong.right, 0.2), blip, 0.07 * blip);
+    CHECK(echo(pong.left, 0.2) < 1.0e-3f);
+    CHECK_NEAR(echo(pong.left, 0.3), 0.5 * blip, 0.07 * blip);
+
+    // Spread makes the right channel's delay 50% longer.
+    p[param::DelayMode] = 0.0f;
+    p[param::DelaySpread] = 1.0f;
+    const auto spread = run(p);
+    CHECK_NEAR(echo(spread.left, 0.1), blip, 0.03 * blip);
+    CHECK(echo(spread.right, 0.1) < 1.0e-3f);
+    CHECK_NEAR(echo(spread.right, 0.15), blip, 0.03 * blip);
+
+    // Tempo sync: an eighth note is 250 ms at 120 bpm and 500 ms at 60 bpm.
+    p[param::DelaySpread] = 0.0f;
+    p[param::DelaySync] = 3.0f;
+    CHECK(choiceName(spec(param::DelaySync), 3.0f) == "1/8");
+    CHECK_NEAR(echo(run(p, 120.0).left, 0.25), blip, 0.03 * blip);
+    CHECK(echo(run(p, 120.0).left, 0.1) < 1.0e-3f);
+    CHECK_NEAR(echo(run(p, 60.0).left, 0.5), blip, 0.03 * blip);
+
+    // The high cut dulls each repeat: a 880 Hz blip through a 500 Hz cut gets quieter faster.
+    p[param::DelaySync] = 0.0f;
+    p[param::DelayHighCutHz] = 500.0f;
+    const auto dull = run(p);
+    CHECK(echo(dull.left, 0.2) < 0.5 * echo(wet.left, 0.2));
+
+    // Modulation keeps the echoes but moves them, so the result differs.
+    p[param::DelayHighCutHz] = 20000.0f;
+    p[param::DelayModDepth] = 1.0f;
+    p[param::DelayModRateHz] = 3.0f;
+    const auto wobbly = run(p);
+    CHECK(wobbly.left != wet.left);
+    CHECK(wobbly.left != wobbly.right);
+    CHECK(echo(wobbly.left, 0.1) > 0.5f * blip);
+}
+
+void testReverb()
+{
+    const double sr = 48000.0;
+    const auto run = [&](const ParamValues& p) {
+        const NoteEvent events[] = {{0.0, 0.03, 60, 1.0f}};
+        RenderSettings settings;
+        settings.sampleRate = sr;
+        settings.tailSec = 1.2;
+        return render(p, events, settings);
+    };
+
+    // A short burst of noise into a fully wet reverb.
+    auto p = blipPatch();
+    p[param::Osc1Level] = 0.0f;
+    p[param::NoiseLevel] = 1.0f;
+    p[param::AmpDecayMs] = 20.0f;
+    const auto dry = run(p);
+    CHECK(peak(dry.left, at(0.1, sr), dry.numFrames()) == 0.0f);
+
+    p[param::ReverbOn] = 1.0f;
+    p[param::ReverbMix] = 1.0f;
+    p[param::ReverbDamping] = 0.0f;
+    p[param::ReverbPredelayMs] = 0.0f;
+
+    // The tail falls 60 dB in the decay time: 36 dB over 0.6 s for a 1 s decay.
+    const auto dropDb = [&](const StereoBuffer& a) {
+        const double early = rms(a.left, at(0.2, sr), at(0.3, sr));
+        const double late = rms(a.left, at(0.8, sr), at(0.9, sr));
+        return 20.0 * std::log10(early / late);
+    };
+    p[param::ReverbDecaySec] = 1.0f;
+    const auto shortTail = run(p);
+    CHECK_NEAR(dropDb(shortTail), 36.0, 4.0);
+    p[param::ReverbDecaySec] = 3.0f;
+    const auto longTail = run(p);
+    CHECK_NEAR(dropDb(longTail), 12.0, 3.0);
+
+    // The room size doesn't change the decay time.
+    p[param::ReverbSize] = 1.0f;
+    CHECK_NEAR(dropDb(run(p)), 12.0, 3.0);
+    p[param::ReverbSize] = 0.5f;
+
+    // Damping makes the tail die sooner (treble first).
+    p[param::ReverbDamping] = 0.9f;
+    const auto damped = run(p);
+    CHECK(rms(damped.left, at(0.8, sr), at(0.9, sr)) < 0.5 * rms(longTail.left, at(0.8, sr), at(0.9, sr)));
+    p[param::ReverbDamping] = 0.0f;
+
+    // Stereo by default, mono at a width of 0.
+    CHECK(longTail.left != longTail.right);
+    p[param::ReverbWidth] = 0.0f;
+    const auto narrow = run(p);
+    CHECK(narrow.left == narrow.right);
+    p[param::ReverbWidth] = 1.0f;
+
+    // Pre-delay holds the reverb back.
+    p[param::ReverbPredelayMs] = 100.0f;
+    const auto late = run(p);
+    CHECK(peak(late.left, 0, at(0.095, sr)) == 0.0f);
+    CHECK(peak(late.left, at(0.1, sr), at(0.3, sr)) > 1.0e-3f);
+    p[param::ReverbPredelayMs] = 0.0f;
+
+    // A mix of 0 is the dry signal exactly.
+    p[param::ReverbMix] = 0.0f;
+    CHECK(run(p).left == dry.left);
+
+    // How loud is the reverb next to the dry sound? Held saw, fully wet.
+    auto level = sawPatch();
+    const auto drySaw = renderNote(level, 57, 2.0, 0.0, sr);
+    level[param::ReverbOn] = 1.0f;
+    level[param::ReverbMix] = 1.0f;
+    const auto wetSaw = renderNote(level, 57, 2.0, 0.0, sr);
+    const double wetDb = 20.0 * std::log10(rms(wetSaw.left, at(1.5, sr), at(2.0, sr)) / rms(drySaw.left, at(1.5, sr), at(2.0, sr)));
+    std::printf("reverb: fully wet level for a held note at the default settings: %.1f dB relative to dry\n", wetDb);
+    CHECK_NEAR(wetDb, -3.0, 4.0);
+}
+
+void testMatchEq()
+{
+    const double sr = 48000.0;
+    const auto flat = sinePatch();
+
+    // All gains zero: no change at all.
+    MatchEqGains gains{};
+    CHECK_NEAR(sineLevelDb(flat, 69, &gains), sineLevelDb(flat, 69), 1e-9);
+
+    // An uneven curve: the level at each test note follows the bank's response.
+    for (std::size_t band = 0; band < gains.size(); ++band)
+        gains[band] = 6.0f * static_cast<float>(std::sin(0.7 * static_cast<double>(band)));
+    const auto coeffs = dsp::matchEqCoeffs(sr, gains);
+    for (const int note : {33, 57, 69, 81, 100}) {
+        const double expected = dsp::matchEqGainDbAt(coeffs, noteHz(note), sr);
+        CHECK_NEAR(sineLevelDb(flat, note, &gains) - sineLevelDb(flat, note), expected, 0.05);
+    }
+
+    // The amount parameter scales the band gains.
+    auto half = flat;
+    half[param::MatchEqAmount] = 0.5f;
+    const auto halfCoeffs = dsp::matchEqCoeffs(sr, gains, 0.5);
+    CHECK_NEAR(sineLevelDb(half, 69, &gains) - sineLevelDb(flat, 69), dsp::matchEqGainDbAt(halfCoeffs, 440.0, sr), 0.05);
+    auto none = flat;
+    none[param::MatchEqAmount] = 0.0f;
+    CHECK_NEAR(sineLevelDb(none, 69, &gains), sineLevelDb(flat, 69), 1e-9);
+
+    // Band centres: three per octave, band 17 at 1 kHz.
+    CHECK_NEAR(dsp::matchEqBandHz(17), 1000.0, 1e-9);
+    CHECK_NEAR(dsp::matchEqBandHz(20), 2000.0, 1e-9);
+    CHECK_NEAR(dsp::matchEqBandHz(0), 19.686, 0.001);
+}
+
+void testEverythingAtOnce()
+{
+    // All features on at extreme settings must stay finite at every sample rate.
+    for (const double sr : {22050.0, 44100.0, 48000.0, 96000.0}) {
+        auto p = defaultValues();
+        p[param::GainDb] = 0.0f;
+        p[param::Osc2Level] = 1.0f;
+        p[param::Osc3Level] = 1.0f;
+        p[param::Osc3Wave] = static_cast<float>(Wave::Square);
+        p[param::NoiseLevel] = 0.5f;
+        p[param::UnisonVoices] = 7.0f;
+        p[param::UnisonDetune] = 100.0f;
+        p[param::UnisonSpread] = 1.0f;
+        p[param::FilterResonance] = 1.0f;
+        p[param::FilterCutoffHz] = 2000.0f;
+        p[param::Lfo1Target] = static_cast<float>(dsp::LfoTarget::Pitch);
+        p[param::Lfo1Depth] = 1.0f;
+        p[param::Lfo1RateHz] = 30.0f;
+        p[param::Lfo2Target] = static_cast<float>(dsp::LfoTarget::Cutoff);
+        p[param::Lfo2Wave] = static_cast<float>(dsp::LfoWave::Random);
+        p[param::Lfo2Depth] = 1.0f;
+        p[param::Lfo2RateHz] = 30.0f;
+        p[param::EqOn] = 1.0f;
+        p[param::EqLowGainDb] = 18.0f;
+        p[param::EqHighGainDb] = 18.0f;
+        p[param::EqHighFreqHz] = 18000.0f;
+        p[param::DelayOn] = 1.0f;
+        p[param::DelayTimeMs] = 2000.0f;
+        p[param::DelaySpread] = 1.0f;
+        p[param::DelayFeedback] = 0.95f;
+        p[param::DelayModDepth] = 1.0f;
+        p[param::DelayModRateHz] = 10.0f;
+        p[param::ReverbOn] = 1.0f;
+        p[param::ReverbSize] = 1.0f;
+        p[param::ReverbDecaySec] = 20.0f;
+        p[param::ReverbMix] = 1.0f;
+
+        Preset preset;
+        preset.params = p;
+        preset.matchEq.fill(18.0f);
+
+        const NoteEvent events[] = {{0.0, 0.3, 24, 1.0f}, {0.05, 0.3, 127, 1.0f}, {0.1, 0.2, 60, 1.0f}};
+        RenderSettings settings;
+        settings.sampleRate = sr;
+        settings.tailSec = 0.3;
+        const auto audio = render(preset, events, settings);
+        bool finite = true;
+        for (std::size_t i = 0; i < audio.numFrames(); ++i)
+            finite = finite && std::isfinite(audio.left[i]) && std::isfinite(audio.right[i]);
+        CHECK(finite);
+    }
+}
+
+// ---------------------------------------------------------------- presets
+
+void testJson()
+{
+    std::string error;
+    const auto doc = Json::parse(R"({"a": 1.5, "b": [1, 2, {"c": "x\ny"}], "t": true, "n": null, "u": "é",})", &error);
+    CHECK(doc.has_value());
+    if (doc) {
+        CHECK(doc->find("a") && doc->find("a")->number() == 1.5);
+        CHECK(doc->find("b") && doc->find("b")->items().size() == 3);
+        CHECK(doc->find("b")->items()[2].find("c")->string() == "x\ny");
+        CHECK(doc->find("t")->boolean());
+        CHECK(doc->find("n")->isNull());
+        CHECK(doc->find("u")->string() == "\xC3\xA9");
+        CHECK(!doc->find("missing"));
+
+        // Writing and reading again gives the same document.
+        const auto again = Json::parse(doc->dump(2));
+        CHECK(again && again->dump(0) == doc->dump(0));
+    }
+
+    for (const char* bad : {"", "{", "{\"a\" 1}", "[1, 2", "{\"a\": tru}", "\"open", "{} extra", "nope"}) {
+        error.clear();
+        CHECK(!Json::parse(bad, &error));
+        CHECK(!error.empty());
+    }
+
+    CHECK(formatNumber(0.3f) == "0.3");
+    CHECK(formatNumber(350.0) == "350");
+    CHECK(formatNumber(-12.5) == "-12.5");
+    CHECK(formatNumber(20000.0) == "20000");
+}
+
+void testPreset()
+{
+    Preset preset;
+    preset.name = "Test \"pad\"";
+    preset.params[param::Osc1Wave] = static_cast<float>(Wave::Square);
+    preset.params[param::FilterCutoffHz] = 1234.5f;
+    preset.params[param::FilterType] = static_cast<float>(FilterType::BandPass);
+    preset.params[param::ReverbOn] = 1.0f;
+    preset.params[param::DelaySync] = 4.0f;
+    preset.params[param::UnisonVoices] = 5.0f;
+    preset.params[param::Lfo1Target] = static_cast<float>(dsp::LfoTarget::Cutoff);
+    preset.params[param::AmpAttackMs] = 0.1f;
+    for (std::size_t band = 0; band < preset.matchEq.size(); ++band)
+        preset.matchEq[band] = static_cast<float>(band) * 0.25f - 3.0f;
+
+    // Write, read back, compare.
+    const std::string text = presetToJson(preset);
+    std::string error;
+    std::vector<std::string> warnings;
+    const auto loaded = presetFromJson(text, &error, &warnings);
+    CHECK(loaded.has_value());
+    CHECK(warnings.empty());
+    if (loaded) {
+        CHECK(loaded->name == preset.name);
+        for (int i = 0; i < kNumParams; ++i) {
+            const auto k = static_cast<std::size_t>(i);
+            CHECK_NEAR(loaded->params[k], preset.params[k], 1e-5 * std::max(1.0f, std::abs(preset.params[k])));
+        }
+        for (std::size_t band = 0; band < preset.matchEq.size(); ++band)
+            CHECK_NEAR(loaded->matchEq[band], preset.matchEq[band], 0.006);
+    }
+
+    // The file is grouped by node and uses names for choices.
+    const auto root = Json::parse(text);
+    CHECK(root.has_value());
+    if (root) {
+        const Json* nodes = root->find("nodes");
+        CHECK(nodes && nodes->find("osc1") && nodes->find("osc1")->find("wave")->string() == "square");
+        CHECK(nodes->find("filter")->find("type")->string() == "bandpass");
+        CHECK(nodes->find("filter")->find("cutoff_hz")->number() == 1234.5);
+        CHECK(nodes->find("reverb")->find("on")->string() == "on");
+        CHECK(nodes->find("delay")->find("sync")->string() == "1/8D");
+        CHECK(nodes->find("master")->find("gain_db")->number() == -12.0);
+        CHECK(nodes->find("matcheq")->find("gains_db")->items().size() == preset.matchEq.size());
+        CHECK(nodes->members().size() == nodeNames().size());
+    }
+
+    // A partial file changes only what it mentions. Values can be names,
+    // numbers, numbers in strings or true/false; "params" is the flat form.
+    warnings.clear();
+    const auto partial = presetFromJson(R"({
+        "nodes": { "filter": { "cutoff_hz": 900, "type": "highpass", "resonance": "0.5" },
+                   "delay": { "on": true, "sync": "1/4" },
+                   "nope": { "x": 1 },
+                   "osc1": { "banana": 2, "level": 7 } },
+        "params": { "reverb_mix": 0.4, "not_a_param": 1 }
+    })", &error, &warnings, preset);
+    CHECK(partial.has_value());
+    if (partial) {
+        CHECK(partial->params[param::FilterCutoffHz] == 900.0f);
+        CHECK(partial->params[param::FilterType] == static_cast<float>(FilterType::HighPass));
+        CHECK(partial->params[param::FilterResonance] == 0.5f);
+        CHECK(partial->params[param::DelayOn] == 1.0f);
+        CHECK(partial->params[param::DelaySync] == 5.0f);
+        CHECK(partial->params[param::ReverbMix] == 0.4f);
+        CHECK(partial->params[param::Osc1Level] == 1.0f); // 7 was limited to the maximum
+        CHECK(partial->params[param::UnisonVoices] == 5.0f); // untouched
+        CHECK(partial->name == preset.name);
+        CHECK(warnings.size() == 4); // nope.x, osc1.banana, osc1.level limited, not_a_param
+    }
+
+    CHECK(!presetFromJson("not json", &error));
+    CHECK(!presetFromJson("[1, 2]", &error));
+
+    // Save and load a file.
+    const auto path = std::filesystem::temp_directory_path() / "synthmatch_test_preset.json";
+    CHECK(savePreset(path, preset, &error));
+    const auto fromFile = loadPreset(path, &error);
+    CHECK(fromFile && fromFile->params == loaded->params);
+    std::filesystem::remove(path);
+    CHECK(!loadPreset(path, &error));
+}
+
 // ---------------------------------------------------------------- golden renders
 
 struct GoldenCase {
     const char* name;
     ParamValues params;
     std::vector<NoteEvent> notes;
+    bool stereo = false; // the file holds the left channel, then the right
 };
 
 std::vector<GoldenCase> goldenCases()
@@ -895,6 +1493,51 @@ std::vector<GoldenCase> goldenCases()
         cases.push_back({"bandpass_res_g3", p, {{0.0, 0.25, 55, 1.0f}}});
     }
 
+    {
+        // A wide detuned stack with vibrato and a random filter wobble.
+        auto p = defaultValues();
+        p[param::UnisonVoices] = 5.0f;
+        p[param::UnisonDetune] = 22.0f;
+        p[param::UnisonSpread] = 0.8f;
+        p[param::Osc2Level] = 0.5f;
+        p[param::Osc2Wave] = static_cast<float>(Wave::Square);
+        p[param::Osc2Coarse] = -12.0f;
+        p[param::FilterCutoffHz] = 1800.0f;
+        p[param::FilterResonance] = 0.3f;
+        p[param::Lfo1Target] = static_cast<float>(dsp::LfoTarget::Pitch);
+        p[param::Lfo1RateHz] = 6.0f;
+        p[param::Lfo1Depth] = 0.15f;
+        p[param::Lfo2Target] = static_cast<float>(dsp::LfoTarget::Cutoff);
+        p[param::Lfo2Wave] = static_cast<float>(dsp::LfoWave::Random);
+        p[param::Lfo2RateHz] = 12.0f;
+        p[param::Lfo2Depth] = 0.3f;
+        p[param::AmpAttackMs] = 30.0f;
+        cases.push_back({"unison_lfo_pad", p, {{0.0, 0.25, 57, 0.9f}, {0.04, 0.2, 64, 0.8f}}, true});
+    }
+
+    {
+        // The effects chain: EQ, ping-pong delay with modulation, and reverb.
+        auto p = defaultValues();
+        p[param::AmpDecayMs] = 60.0f;
+        p[param::AmpSustain] = 0.0f;
+        p[param::FilterCutoffHz] = 3000.0f;
+        p[param::EqOn] = 1.0f;
+        p[param::EqLowGainDb] = 4.0f;
+        p[param::EqMid2GainDb] = -5.0f;
+        p[param::EqHighGainDb] = 3.0f;
+        p[param::DelayOn] = 1.0f;
+        p[param::DelayTimeMs] = 90.0f;
+        p[param::DelayFeedback] = 0.5f;
+        p[param::DelayMix] = 0.4f;
+        p[param::DelayMode] = 1.0f;
+        p[param::DelayHighCutHz] = 5000.0f;
+        p[param::DelayModDepth] = 0.3f;
+        p[param::ReverbOn] = 1.0f;
+        p[param::ReverbMix] = 0.35f;
+        p[param::ReverbDecaySec] = 1.2f;
+        cases.push_back({"fx_chain_pluck", p, {{0.0, 0.1, 62, 1.0f}, {0.12, 0.1, 69, 0.8f}}, true});
+    }
+
     return cases;
 }
 
@@ -906,7 +1549,12 @@ void testGoldenRenders()
     for (const auto& c : goldenCases()) {
         RenderSettings settings;
         settings.tailSec = 0.15;
-        const auto audio = render(c.params, c.notes, settings);
+        const auto rendered = render(c.params, c.notes, settings);
+        struct {
+            std::vector<float> left;
+        } audio{rendered.left};
+        if (c.stereo)
+            audio.left.insert(audio.left.end(), rendered.right.begin(), rendered.right.end());
         const auto path = dir / (std::string(c.name) + ".f32");
         const auto bytes = static_cast<std::streamsize>(audio.left.size() * sizeof(float));
 
@@ -957,7 +1605,36 @@ void testWavFile()
     CHECK(writeWav(path, audio, &error));
     // 12-byte RIFF header + 26-byte fmt + 12-byte fact + 8-byte data header + samples.
     CHECK(std::filesystem::file_size(path) == 58 + audio.numFrames() * 8);
+
+    // Reading it back gives the same samples.
+    const auto back = readWav(path, &error);
+    CHECK(back.has_value());
+    if (back) {
+        CHECK(back->sampleRate == audio.sampleRate);
+        CHECK(back->left == audio.left);
+        CHECK(back->right == audio.right);
+    }
     std::filesystem::remove(path);
+    CHECK(!readWav(path, &error));
+
+    // A hand-made 16-bit mono PCM file: 4 samples at 8 kHz.
+    const unsigned char pcm[] = {'R', 'I', 'F', 'F', 44,  0,   0,   0,   'W', 'A', 'V', 'E', 'f', 'm', 't', ' ', 16,  0,
+                                 0,   0,   1,   0,   1,   0,   0x40, 0x1F, 0,  0,   0x80, 0x3E, 0,  0,   2,   0,   16,  0,
+                                 'd', 'a', 't', 'a', 8,   0,   0,   0,   0,   0,   0,   0x40, 0,  0x80, 0xFF, 0x7F};
+    const auto pcmPath = std::filesystem::temp_directory_path() / "synthmatch_test_pcm.wav";
+    {
+        std::ofstream out(pcmPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(pcm), sizeof pcm);
+    }
+    const auto mono = readWav(pcmPath, &error);
+    CHECK(mono.has_value());
+    if (mono) {
+        CHECK(mono->sampleRate == 8000.0);
+        CHECK(mono->numFrames() == 4);
+        CHECK(mono->left == std::vector<float>({0.0f, 0.5f, -1.0f, 32767.0f / 32768.0f}));
+        CHECK(mono->right == mono->left);
+    }
+    std::filesystem::remove(pcmPath);
 }
 
 } // namespace
@@ -989,6 +1666,16 @@ int main(int argc, char** argv)
     testFilterEnvelope();
     testBlockSizeIndependence();
     testFilterStability();
+    testUnison();
+    testLfo();
+    testPitchBend();
+    testEqNode();
+    testDelay();
+    testReverb();
+    testMatchEq();
+    testEverythingAtOnce();
+    testJson();
+    testPreset();
     testGoldenRenders();
     testWavFile();
 

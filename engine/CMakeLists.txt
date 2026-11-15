@@ -1,6 +1,8 @@
 add_library(synthmatch_engine STATIC
     src/Params.cpp
     src/Engine.cpp
+    src/Json.cpp
+    src/Preset.cpp
     src/Render.cpp
     src/Wav.cpp
 )

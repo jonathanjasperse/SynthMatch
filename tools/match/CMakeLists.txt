@@ -1,0 +1,3 @@
+add_executable(synthmatch_match_cli main.cpp)
+set_target_properties(synthmatch_match_cli PROPERTIES OUTPUT_NAME synthmatch_match)
+target_link_libraries(synthmatch_match_cli PRIVATE synthmatch::match)

@@ -4,8 +4,10 @@
 // the tests, and later by the matcher and dataset generator.
 
 #include "synthmatch/Params.h"
+#include "synthmatch/Preset.h"
 
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -23,6 +25,7 @@ struct RenderSettings {
     double sampleRate = 48000.0;
     double tailSec = 1.0; // rendered after the last note-off
     int blockSize = 256;
+    double tempoBpm = 120.0; // for tempo-synced delay
 };
 
 struct StereoBuffer {
@@ -37,7 +40,14 @@ struct StereoBuffer {
 StereoBuffer render(const ParamValues& params, std::span<const NoteEvent> notes,
                     const RenderSettings& settings = {});
 
+// The same, including the preset's match EQ curve.
+StereoBuffer render(const Preset& preset, std::span<const NoteEvent> notes, const RenderSettings& settings = {});
+
 // Writes a 32-bit float stereo WAV file.
 bool writeWav(const std::filesystem::path& path, const StereoBuffer& audio, std::string* error = nullptr);
+
+// Reads a WAV file (8/16/24/32-bit PCM or 32/64-bit float, any channel count).
+// Mono files fill both channels; files with more than two keep the first two.
+std::optional<StereoBuffer> readWav(const std::filesystem::path& path, std::string* error = nullptr);
 
 } // namespace synthmatch

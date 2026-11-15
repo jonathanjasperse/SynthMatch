@@ -26,14 +26,19 @@ std::int64_t toSamples(double seconds, double sampleRate)
 
 } // namespace
 
-StereoBuffer render(const ParamValues& params, std::span<const NoteEvent> notes, const RenderSettings& settings)
+namespace {
+
+StereoBuffer renderImpl(const ParamValues& params, std::span<const float> matchEq,
+                        std::span<const NoteEvent> notes, const RenderSettings& settings)
 {
     const double sampleRate = settings.sampleRate > 0.0 ? settings.sampleRate : 48000.0;
     const int blockSize = std::max(1, settings.blockSize);
 
     Engine engine;
     engine.prepare(sampleRate);
+    engine.setTempo(settings.tempoBpm);
     engine.setParams(params);
+    engine.setMatchEq(matchEq);
 
     std::vector<TimedEvent> events;
     events.reserve(notes.size() * 2);
@@ -83,6 +88,18 @@ StereoBuffer render(const ParamValues& params, std::span<const NoteEvent> notes,
     }
 
     return out;
+}
+
+} // namespace
+
+StereoBuffer render(const ParamValues& params, std::span<const NoteEvent> notes, const RenderSettings& settings)
+{
+    return renderImpl(params, {}, notes, settings);
+}
+
+StereoBuffer render(const Preset& preset, std::span<const NoteEvent> notes, const RenderSettings& settings)
+{
+    return renderImpl(preset.params, preset.matchEq, notes, settings);
 }
 
 } // namespace synthmatch

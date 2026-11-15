@@ -1,0 +1,3 @@
+add_executable(synthmatch_train_cli main.cpp)
+set_target_properties(synthmatch_train_cli PROPERTIES OUTPUT_NAME synthmatch_train)
+target_link_libraries(synthmatch_train_cli PRIVATE synthmatch::train)

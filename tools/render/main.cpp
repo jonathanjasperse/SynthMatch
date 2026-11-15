@@ -1,6 +1,7 @@
 // synthmatch_render: render notes through the engine to a WAV file, without a DAW.
 
 #include "synthmatch/Params.h"
+#include "synthmatch/Preset.h"
 #include "synthmatch/Render.h"
 
 #include <algorithm>
@@ -24,6 +25,9 @@ void printUsage()
         "  --length SEC      time until note-off (default: 1.0)\n"
         "  --tail SEC        audio rendered after note-off (default: 1.0)\n"
         "  --rate HZ         sample rate (default: 48000)\n"
+        "  --tempo BPM       tempo for tempo-synced delay (default: 120)\n"
+        "  --preset PATH     start from a preset file (.json)\n"
+        "  --save-preset PATH  write the resulting preset to a file\n"
         "  --set ID=VALUE    set a parameter; repeatable (see --list-params)\n"
         "  --list-params     print the parameter schema and exit\n"
         "  --help            show this message");
@@ -74,7 +78,9 @@ int main(int argc, char** argv)
     double velocity = 0.8;
     double length = 1.0;
     synthmatch::RenderSettings settings;
-    auto params = synthmatch::defaultValues();
+    synthmatch::Preset preset;
+    auto& params = preset.params;
+    std::string savePresetPath;
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
@@ -112,6 +118,20 @@ int main(int argc, char** argv)
             if (!parseDouble(value, settings.sampleRate) || settings.sampleRate < 8000.0 ||
                 settings.sampleRate > 384000.0)
                 return fail("--rate must be 8000-384000");
+        } else if (arg == "--tempo") {
+            if (!parseDouble(value, settings.tempoBpm) || settings.tempoBpm < 20.0 || settings.tempoBpm > 400.0)
+                return fail("--tempo must be 20-400");
+        } else if (arg == "--preset") {
+            std::string error;
+            std::vector<std::string> warnings;
+            const auto loaded = synthmatch::loadPreset(value, &error, &warnings);
+            if (!loaded)
+                return fail(error);
+            for (const auto& w : warnings)
+                std::fprintf(stderr, "warning: %s\n", w.c_str());
+            preset = *loaded;
+        } else if (arg == "--save-preset") {
+            savePresetPath = value;
         } else if (arg == "--set") {
             const std::string_view kv = value;
             const auto eq = kv.find('=');
@@ -142,9 +162,11 @@ int main(int argc, char** argv)
     for (const int n : notes)
         events.push_back({0.0, length, n, static_cast<float>(velocity)});
 
-    const auto audio = synthmatch::render(params, events, settings);
+    const auto audio = synthmatch::render(preset, events, settings);
 
     std::string error;
+    if (!savePresetPath.empty() && !synthmatch::savePreset(savePresetPath, preset, &error))
+        return fail(error);
     if (!synthmatch::writeWav(outPath, audio, &error))
         return fail(error);
 

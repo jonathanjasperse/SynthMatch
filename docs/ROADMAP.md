@@ -1,17 +1,16 @@
 # Roadmap
 
 SynthMatch is a synth plugin that analyzes a reference recording of a synth and
-builds a preset that sounds like it. Each stage below is small, ends in
-something testable, and builds on the one before.
+builds a preset that sounds like it. Each stage below ends in something
+testable and builds on the one before.
 
 ## Architecture rule
 
-The engine (`engine/`) is plain C++ with no JUCE or GUI code. The same engine
-runs in three places:
+The synth (`engine/`), the matcher (`match/`) and the assistant (`assist/`) are
+plain C++ with no JUCE or GUI code. The same code runs in:
 
 - the plugin (`plugin/`), which users load in a DAW
-- the render CLI (`tools/render/`), which renders a preset and notes to a `.wav`
-- Python bindings (Stage 5), used for matching, dataset generation and training
+- the command-line tools (`tools/`): render, match, edit, train
 
 The parameter schema (`engine/src/Params.cpp`) defines every parameter once.
 Never rename or reorder parameter ids, because presets and trained models refer
@@ -19,82 +18,81 @@ to them.
 
 ## Stages
 
-### Stage 0: Scaffold
-CMake project, JUCE 9 plugin (VST3 + Standalone, plus AU on macOS), a sine-wave
-engine with an attack/release envelope, the render CLI, tests, and CI on
-Windows, macOS and Linux (engine only on Linux).
+### Stage 0: Scaffold (done)
+CMake project, JUCE 9 plugin (VST3 + Standalone, plus AU on macOS), the render
+CLI, tests, and CI on Windows, macOS and Linux (no plugin on Linux).
 
-Done when:
 - [x] the engine, CLI and tests build and pass on Windows
-- [ ] the plugin loads and plays in a DAW on Windows
-- [x] CI passes on Windows, macOS and Ubuntu (2026-11-09, commit 72d750d)
+- [ ] the plugin loads and plays in a DAW on Windows (needs a person with a DAW)
+- [x] CI passes on Windows, macOS and Ubuntu
 
-### Stage 1: Engine core (current)
-3 oscillators (saw, square, triangle, sine, noise, with detune and unison),
-mixer, filter (state-variable / ZDF), amp and filter envelopes (ADSR), 2 LFOs,
-and polyphony. Oscillators must be band-limited (e.g. PolyBLEP).
-Done when: golden-render tests pass (render a fixed preset and compare it with a
-saved reference).
+### Stage 1: Engine core (done, except 1d)
+- [x] **1a** 3 band-limited oscillators (sine, triangle, saw, square with pulse
+  width), tuning, mixer, white noise, ADSR amp envelope, golden-render tests.
+- [x] **1b** State-variable (ZDF) low-pass, band-pass and high-pass filter with
+  resonance, key tracking and its own ADSR envelope.
+- [x] **1c** 2 LFOs (sine, triangle, saw, square, random) on pitch, cutoff, amp
+  or pulse width; unison up to 7 voices with detune and stereo spread; pitch
+  bend; tempo from the host.
+- [ ] **1d** Polish: parameter smoothing (automating a knob can zipper), click-free
+  voice stealing. Performance is fine: the worst case (16 voices, all 3
+  oscillators with 7-voice unison, every effect on) uses about 9% of one CPU
+  core on the dev laptop.
 
-Built in slices:
-- [x] **1a** Oscillators and amp envelope: 3 band-limited oscillators (sine,
-  triangle, saw, square with pulse width), coarse and fine tuning, mixer levels,
-  white noise, ADSR amp envelope, golden-render tests.
-- [x] **1b** Filter: state-variable (ZDF) low-pass, band-pass and high-pass with
-  cutoff, resonance and key tracking, plus an ADSR filter envelope. The filter
-  is always in the signal path; the default is a low-pass fully open at 20 kHz.
-- [ ] **1c** Modulation and width: 2 LFOs with assignable targets, unison with
-  detune and stereo spread, pitch bend.
-- [ ] **1d** Polish: parameter smoothing (no zipper noise), click-free voice
-  stealing, performance check with all 16 voices.
+### Stage 2: Main view and presets (done)
+- [x] Presets as readable JSON grouped by node; partial files work; the render
+  tool reads and writes them.
+- [x] Main view: drop or choose a recording, match progress, score, waveform,
+  spectrum comparison, reference and synth playback, key knobs.
+- [x] The look: dark gunmetal with glossy metal polyhedra in the background.
 
-### Stage 2: Synth view and presets
-A real editor with knobs bound to the schema. Presets saved and loaded as JSON.
-The render CLI accepts a preset file.
+### Stage 3: Node mode (done for a fixed signal path)
+- [x] Edit button to a node view and Back to the main view.
+- [x] Nodes for the 3 oscillators, noise, mixer, filter, amp, 2 LFOs, EQ, delay,
+  reverb, match EQ and output, wired in signal order, with an inspector strip.
+- [x] Delay with many settings (time or tempo sync, feedback, ping-pong, spread,
+  low and high cut in the feedback, modulation), reverb (feedback delay
+  network), 4-band EQ.
+- [ ] Re-routable wiring (reorder effects, parallel paths, extra mixers). The
+  engine's path is fixed today; this needs a graph compiled on the message
+  thread and swapped into the audio thread.
 
-### Stage 3: Node mode
-Mode switch between the Synth view and the Node view. A graph editor with nodes,
-ports and wires. Delay, reverb, EQ and mixer nodes. The graph is compiled on the
-message thread and swapped atomically into the audio thread.
+### Stage 4: Match EQ (done)
+31 third-octave bands fitted to the difference between the reference and the
+synth's long-term spectra, kept only where it improves the match, with an
+Amount control. Separate from the adjustable EQ node.
 
-### Stage 4: Match EQ
-Load a reference file, compare long-term average spectra, and apply a smoothed
-correction curve with Amount, Smoothing and Range controls. Pure DSP. Separate
-from the adjustable EQ node.
+### Stage 5: DSP matching (done)
+Note detection (YIN pitch tracking, onsets, legato and repeated notes), a log-mel
+spectrogram distance with an envelope term, and a CMA-ES search over 43
+dimensions that renders candidates through the real engine on all cores but one.
+Done in C++ rather than Python, so the plugin runs the same code.
 
-### Stage 5: DSP matching
-Python bindings for the engine. Prototype analysis in Python (pitch, envelope,
-harmonics, noise, reverb tails), then a CMA-ES search that renders through the
-engine and minimizes a multi-resolution STFT + log-mel + envelope loss.
-Done when: a random preset can be found again from its own render.
+- [x] a sound made by the synth is found again from its own render (tested)
+- [ ] better results on sounds the synth can't make exactly, and on chords
 
-### Stage 6: ML encoder
-Generate a large dataset of (render, parameters) pairs, train a small CNN that
-maps spectrograms to parameters, export to ONNX, and use it in the plugin as the
-starting point for the search.
+### Stage 6: ML encoder (done, first version)
+A neural network (multi-layer perceptron) that maps a summary of a note
+(spectrum over time, harmonics, wobble, noisiness) to a starting preset. It is
+trained in C++ on notes rendered on the fly, on the CPU, and embedded in the
+plugin. No GPU, no Python, no ML runtime.
 
-Hardware: nothing in this project needs CUDA.
-- Dataset generation runs the C++ engine on CPU cores. It's the bulk of the work
-  and needs no GPU.
-- Training: PyTorch's Intel XPU build runs on Intel Arc GPUs, including the
-  integrated Arc 140V
-  (`pip install torch --index-url https://download.pytorch.org/whl/xpu`). Plain
-  CPU also works for a small model. Use rented GPUs (Colab, Kaggle, RunPod) only
-  for large sweeps.
-- Inference in the plugin uses ONNX Runtime on CPU, because end users won't have
-  CUDA either. The OpenVINO execution provider can optionally use Intel GPUs and
-  NPUs.
+- [x] trainer, model file, loader that refuses a mismatched model
+- [x] trained model: choices right 69% of the time, continuous settings off by
+  15% of their range (a blind guess is off by about 25%)
+- [ ] make it improve the final match, not just the start: more data, a bigger
+  model, or a spectrogram CNN
 
-### Stage 7: Track isolator
-Source separation (Demucs-class model through ONNX Runtime), run offline on a
+### Stage 7: Track isolator (not started)
+Source separation (a Demucs-class model through ONNX Runtime), run offline on a
 background thread, plus manual cleanup: region select, band-pass, mid/side solo.
 
-### Stage 8: Installers
+### Stage 8: Installers (not started)
 One command builds release installers into `dist/` (which is not committed):
 
 - **Windows:** `dist/SynthMatch-<version>-Windows.exe`, built with Inno Setup.
   Installs the VST3 to `C:\Program Files\Common Files\VST3`, the Standalone
-  app, factory presets and the ONNX models, with an uninstaller.
+  app and factory presets, with an uninstaller.
 - **macOS:** `dist/SynthMatch-<version>-macOS.pkg`, built with `pkgbuild` and
   `productbuild`. Installs the VST3 and AU as universal binaries (Apple Silicon
   and Intel).
@@ -105,5 +103,21 @@ One command builds release installers into `dist/` (which is not committed):
   notarization on macOS (needs a paid Apple Developer account). Unsigned
   installers work for testing but show security warnings.
 
-A basic unsigned installer can be added earlier, any time after Stage 2, so
-testers can install builds without copying files by hand.
+### Stage 9: Assistant terminal (done)
+- [x] A terminal along the bottom of the window: type a change, see exactly what
+  changed, undo it.
+- [x] Built-in rules: a vocabulary of sound words (brighter, warmer, wider,
+  punchier, plucky, pad, vibrato, ...), named settings with units ("cutoff
+  2 kHz"), switches, waveforms and commands. Instant and exact.
+- [x] A small local language model (Ollama, or any OpenAI-style server) for
+  requests the rules don't fully understand. It reads the current settings and
+  answers with edits as JSON constrained by a schema; answers are checked and
+  limited before they are applied. Default `qwen3:1.7b`, or the smallest model
+  installed.
+- [x] The preset JSON can be shown in the terminal (`/json`) and pasted back in.
+
+## Hardware notes
+
+Nothing in this project needs CUDA. Rendering, matching and training run on CPU
+cores. The language model runs in Ollama, which uses the CPU on this laptop
+(about 2 seconds per request for a 1.7B model once it is loaded).

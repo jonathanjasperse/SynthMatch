@@ -16,7 +16,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_subdirectory(engine)
+add_subdirectory(match)
+add_subdirectory(assist)
 add_subdirectory(tools/render)
+add_subdirectory(tools/match)
+add_subdirectory(tools/train)
+add_subdirectory(tools/edit)
 
 if(SYNTHMATCH_BUILD_TESTS)
     enable_testing()
