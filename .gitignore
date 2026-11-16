@@ -13,6 +13,7 @@ CMakeUserPresets.json
 
 # Renders and audio scratch files
 *.wav
+CLAUDE.txt
 
 # Blender's automatic backups (the .blend itself is fine to commit)
 *.blend1
