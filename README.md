@@ -139,6 +139,14 @@ Then build, test and package in one go:
 powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
 ```
 
+Or build just the installer from an existing Release build, from the command
+line or as the `SynthMatch_Installer` target in Visual Studio or VS Code (the
+"Windows installer" build preset):
+
+```bash
+cmake --build build --config Release --target SynthMatch_Installer
+```
+
 On a Mac (Xcode installed): `scripts/package-macos.sh`.
 
 **Building them on GitHub.** You don't need a Mac: the Release workflow builds

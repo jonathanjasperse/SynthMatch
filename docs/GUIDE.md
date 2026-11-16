@@ -72,13 +72,42 @@ type in the terminal. Then load the VST3 in your DAW (Reaper: add
 
 ### Step 4. Open it in Visual Studio and step through code
 
-Open `build/SynthMatch.sln`. In Solution Explorer, right-click
+Use **Visual Studio** (the free Community edition) rather than VS Code for
+this project: its C++ debugger is the best on Windows, and it can attach to a
+DAW to debug the plugin inside it. VS Code works too (with the C/C++ and CMake
+Tools extensions, using the same presets), but debugging is clunkier.
+
+There are two ways to open the project:
+
+- **The solution CMake made:** `build/SynthMatch.slnx` (`.sln` with Visual
+  Studio 2022). It shares `build/` with the command line, so nothing builds
+  twice. The steps below use this.
+- **File > Open > Folder** on the repository. Visual Studio reads
+  `CMakePresets.json`: pick **x64 Debug** or **x64 Release** in the toolbar.
+  It builds in `out/build/`, separately from `build/`.
+
+Open `build/SynthMatch.slnx`. In Solution Explorer, right-click
 `synthmatch_engine_tests` and choose **Set as Startup Project**. Open
 `engine/src/Engine.cpp`, click in the margin next to the first line of
 `Engine::process` to set a breakpoint, switch the configuration at the top from
 Release to **Debug**, and press F5. When it stops, step with F10 (over) and F11
 (into), and hover over variables to see their values. This is how you'll
 understand any part of the code you're unsure about.
+
+### Step 5. Build the Windows installer
+
+Install Inno Setup once (`winget install JRSoftware.InnoSetup`), then either:
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
+```
+
+which builds, runs the tests and packages, or build the **SynthMatch_Installer**
+target in the **Release** configuration: in the solution, right-click it and
+choose Build; with Open Folder, pick **x64 Release** and choose it from
+Build > Build Target (or the "Windows installer" build preset in VS Code). The
+installer lands in `dist/SynthMatch-<version>-Windows.exe`. Test it in a
+virtual machine or on a spare PC if you can: it installs into Program Files.
 
 ---
 

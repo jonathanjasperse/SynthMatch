@@ -19,16 +19,7 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
 ctest --test-dir build -C Release --output-on-failure
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
-$candidates = @(
-    (Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source),
-    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-    "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
-    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
-) | Where-Object { $_ -and (Test-Path $_) }
-if (-not $candidates) {
-    Write-Error "Inno Setup not found. Install it with:  winget install JRSoftware.InnoSetup"
-}
-
-& $candidates[0] "/DAppVersion=$version" "packaging\windows\SynthMatch.iss"
+# Finds Inno Setup and packages the Release build (packaging\windows\build-installer.cmake).
+cmake --build build --config Release --target SynthMatch_Installer
 if ($LASTEXITCODE -ne 0) { exit 1 }
 Write-Host "Done: dist\SynthMatch-$version-Windows.exe"

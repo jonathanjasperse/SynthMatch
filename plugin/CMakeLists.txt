@@ -110,3 +110,19 @@ target_link_libraries(SynthMatch
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
+
+# The Windows installer (Inno Setup), as a target you can build from an IDE or
+# with: cmake --build build --config Release --target SynthMatch_Installer
+# Not part of a normal build. See packaging/windows/build-installer.cmake.
+if(WIN32)
+    add_custom_target(SynthMatch_Installer
+        COMMAND "${CMAKE_COMMAND}"
+            "-DCONFIG=$<CONFIG>"
+            "-DVERSION=${SynthMatch_VERSION}"
+            "-DBUILT=$<TARGET_FILE_DIR:SynthMatch_Standalone>/.."
+            "-DISS=${PROJECT_SOURCE_DIR}/packaging/windows/SynthMatch.iss"
+            -P "${PROJECT_SOURCE_DIR}/packaging/windows/build-installer.cmake"
+        COMMENT "Building the Windows installer"
+        VERBATIM)
+    add_dependencies(SynthMatch_Installer SynthMatch_VST3 SynthMatch_Standalone)
+endif()

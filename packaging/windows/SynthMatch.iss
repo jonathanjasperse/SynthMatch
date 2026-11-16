@@ -1,8 +1,12 @@
 ; SynthMatch installer for Windows (Inno Setup 6.3 or newer).
 ;
-; Build the plugin first (Release), then either run scripts\package-windows.ps1
-; or:  ISCC.exe /DAppVersion=0.2.0 packaging\windows\SynthMatch.iss
-; The installer is written to dist\.
+; Build it with scripts\package-windows.ps1, or by building the
+; SynthMatch_Installer target in Release (from Visual Studio, VS Code or
+; cmake --build build --config Release --target SynthMatch_Installer).
+; Or by hand, after a Release build in build\:
+;   ISCC.exe /DAppVersion=0.2.0 packaging\windows\SynthMatch.iss
+; /DBuilt=<folder> packages a build from another folder (it must hold VST3\
+; and Standalone\). The installer is written to dist\.
 ;
 ; It installs the VST3 plugin and the standalone app. The optional "AI
 ; assistant" component downloads Ollama from ollama.com (if it isn't already
@@ -14,7 +18,9 @@
   #define AppVersion "0.0.0"
 #endif
 #define Root "..\.."
-#define Built Root + "\build\plugin\SynthMatch_artefacts\Release"
+#ifndef Built
+  #define Built Root + "\build\plugin\SynthMatch_artefacts\Release"
+#endif
 #define Model "qwen3:1.7b"
 
 [Setup]

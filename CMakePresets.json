@@ -1,0 +1,50 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl.exe",
+        "CMAKE_CXX_COMPILER": "cl.exe"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "x64-debug",
+      "displayName": "x64 Debug",
+      "description": "For stepping through code in the debugger. Slow audio.",
+      "inherits": "windows-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "x64-release",
+      "displayName": "x64 Release",
+      "description": "Fast builds for playing, testing matching, and the installer.",
+      "inherits": "windows-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "x64-debug", "displayName": "x64 Debug", "configurePreset": "x64-debug" },
+    { "name": "x64-release", "displayName": "x64 Release", "configurePreset": "x64-release" },
+    {
+      "name": "installer",
+      "displayName": "Windows installer",
+      "description": "Builds the plugin and dist/SynthMatch-<version>-Windows.exe (needs Inno Setup).",
+      "configurePreset": "x64-release",
+      "targets": ["SynthMatch_Installer"]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "x64-release",
+      "displayName": "x64 Release",
+      "configurePreset": "x64-release",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
