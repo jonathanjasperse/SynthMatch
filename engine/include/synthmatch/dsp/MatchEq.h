@@ -53,8 +53,14 @@ public:
         coeffs_ = matchEqCoeffs(sampleRate, gainsDb, amount);
         active_ = false;
         for (std::size_t band = 0; band < coeffs_.size(); ++band) {
-            used_[band] = coeffs_[band].b0 != 1.0 || coeffs_[band].b1 != 0.0 || coeffs_[band].a1 != 0.0;
-            active_ = active_ || used_[band];
+            const bool used = coeffs_[band].b0 != 1.0 || coeffs_[band].b1 != 0.0 || coeffs_[band].a1 != 0.0;
+            // A band coming back from bypass starts clean, not from the state
+            // it froze with (which clicks).
+            if (used && !used_[band])
+                for (auto& channel : state_)
+                    channel[band] = BiquadState{};
+            used_[band] = used;
+            active_ = active_ || used;
         }
     }
 

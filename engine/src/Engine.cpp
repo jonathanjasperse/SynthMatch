@@ -26,21 +26,27 @@ double nextNoise(std::uint32_t& state)
     return static_cast<double>(static_cast<std::int32_t>(state)) * (1.0 / 2147483648.0);
 }
 
-// Where each unison copy of an oscillator starts in its cycle. The first copy
-// starts at zero; the rest are scattered so a stack doesn't begin with all its
-// copies lined up in one loud spike.
-double unisonStartPhase(int osc, int copy)
+// Where each unison copy of an oscillator starts in its cycle, scattered so a
+// stack doesn't begin with all its copies lined up in one loud spike. Without
+// unison every oscillator starts at zero. With unison the first copy is
+// scattered too: it's panned furthest left, and starting every oscillator's
+// first copy together made the left channel several dB louder.
+double unisonStartPhase(int osc, int copy, bool unison)
 {
-    if (copy == 0)
+    if (copy == 0 && !unison)
         return 0.0;
     return dsp::wrap01(copy * 0.6180339887498949 + osc * 0.137);
 }
+
+// The glides' time constant.
+constexpr double kGlideSec = 0.005;
 
 } // namespace
 
 void Engine::prepare(double sampleRate)
 {
     sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
+    glideCoeff_ = 1.0 - std::exp(-1.0 / (kGlideSec * sampleRate_));
     dsp::decimatorTaps(); // computed here, not on the audio thread
     delay_.prepare(sampleRate_);
     reverb_.prepare(sampleRate_);
@@ -163,7 +169,22 @@ void Engine::updateDerived()
 
     bendRatio_ = std::exp2(static_cast<double>(pitchBend_) * p(param::BendRange) / 12.0);
 
+    // With nothing sounding there's nothing to click: apply new levels at once.
+    if (std::none_of(voices_.begin(), voices_.end(), [](const Voice& v) { return v.amp.active(); }))
+        snapGlide();
+
     updateEffects();
+}
+
+void Engine::snapGlide()
+{
+    glide_.gain = gain_;
+    glide_.noise = noiseLevel_;
+    glide_.unisonGain = unisonGain_;
+    for (std::size_t k = 0; k < glide_.level.size(); ++k)
+        glide_.level[k] = oscs_[k].level;
+    glide_.left = unisonLeft_;
+    glide_.right = unisonRight_;
 }
 
 void Engine::updateEffects()
@@ -233,7 +254,14 @@ Engine::Voice& Engine::allocateVoice()
         if (!v.amp.active())
             return v;
 
-    // No free voice: steal the oldest one.
+    // No free voice: take the quietest one already being released, where the
+    // cut is least audible, and only when every voice is held, the oldest.
+    Voice* quietest = nullptr;
+    for (auto& v : voices_)
+        if (v.amp.stage == dsp::AdsrState::Stage::Release && (quietest == nullptr || v.amp.level < quietest->amp.level))
+            quietest = &v;
+    if (quietest != nullptr)
+        return *quietest;
     return *std::min_element(voices_.begin(), voices_.end(),
                              [](const Voice& a, const Voice& b) { return a.startOrder < b.startOrder; });
 }
@@ -248,21 +276,24 @@ void Engine::noteOn(int note, float velocity)
     }
 
     Voice& v = allocateVoice();
-    if (!v.amp.active()) {
-        // A free voice starts clean. A stolen one keeps its filter and
-        // envelope state, so it ramps from where it is instead of jumping.
+    const bool stolen = v.amp.active();
+    if (!stolen) {
+        // A free voice starts clean, from known phases. A stolen one keeps its
+        // envelope, filter and oscillator phases, so the waveform carries on
+        // at the new pitch instead of jumping (which clicks at full level).
         v.filterEnv = {};
         v.filter = {};
         v.decimator = {};
+        v.stereo = stereoVoices_;
+        for (int k = 0; k < param::kNumOscs; ++k)
+            for (int u = 0; u < kMaxUnison; ++u)
+                v.phase[static_cast<std::size_t>(k)][static_cast<std::size_t>(u)] = unisonStartPhase(k, u, unisonCount_ > 1);
     }
     v.amp.gateOn();
     v.filterEnv.gateOn();
     v.note = note;
     v.velocity = std::min(velocity, 1.0f);
     v.baseHz = noteToHz(note);
-    for (int k = 0; k < param::kNumOscs; ++k)
-        for (int u = 0; u < kMaxUnison; ++u)
-            v.phase[static_cast<std::size_t>(k)][static_cast<std::size_t>(u)] = unisonStartPhase(k, u);
     v.startOrder = ++noteCounter_;
     // A different noise sequence per note, but the same one every render.
     v.noiseState = static_cast<std::uint32_t>(v.startOrder * 0x9E3779B9u) | 1u;
@@ -321,14 +352,46 @@ void Engine::process(float* left, float* right, int numSamples)
 
 void Engine::renderVoices(float* left, float* right, int numSamples)
 {
+    if (std::none_of(voices_.begin(), voices_.end(), [](const Voice& v) { return v.amp.active(); })) {
+        snapGlide();
+        return;
+    }
+    for (int start = 0; start < numSamples; start += kChunk)
+        renderVoiceChunk(left + start, right + start, std::min(kChunk, numSamples - start));
+}
+
+void Engine::renderVoiceChunk(float* left, float* right, int numSamples)
+{
     const int steps = oversample_ ? 2 : 1;
     const auto& decimatorTaps = dsp::decimatorTaps();
+
+    // Every sample's glided levels, worked out once for all the voices. A
+    // value that has (all but) arrived snaps to its target, so a level glided
+    // to zero really is zero.
+    const auto glideTo = [this](double& value, double target) {
+        value += glideCoeff_ * (target - value);
+        if (std::abs(target - value) < 1.0e-7)
+            value = target;
+        return value;
+    };
+    for (int i = 0; i < numSamples; ++i) {
+        const auto n = static_cast<std::size_t>(i);
+        ramps_.gain[n] = glideTo(glide_.gain, gain_);
+        ramps_.noise[n] = glideTo(glide_.noise, noiseLevel_);
+        ramps_.unisonGain[n] = glideTo(glide_.unisonGain, unisonGain_);
+        for (std::size_t k = 0; k < glide_.level.size(); ++k)
+            ramps_.level[k][n] = glideTo(glide_.level[k], oscs_[k].level);
+        for (std::size_t u = 0; u < glide_.left.size(); ++u) {
+            ramps_.left[u][n] = glideTo(glide_.left[u], unisonLeft_[u]);
+            ramps_.right[u][n] = glideTo(glide_.right[u], unisonRight_[u]);
+        }
+    }
 
     for (auto& v : voices_) {
         if (!v.amp.active())
             continue;
-
-        const float amp = gain_ * v.velocity;
+        if (stereoVoices_)
+            v.stereo = true;
 
         std::array<double, param::kNumOscs> baseIncrement{};
         for (std::size_t k = 0; k < baseIncrement.size(); ++k)
@@ -352,9 +415,11 @@ void Engine::renderVoices(float* left, float* right, int numSamples)
         dsp::SvfCoeffs coeffs = filterCoeffs(coeffsEnvLevel, coeffsLfoOctaves);
 
         for (int i = 0; i < numSamples; ++i) {
+            const auto n = static_cast<std::size_t>(i);
             const float env = dsp::adsrTick(v.amp, ampEnv_);
             if (!v.amp.active())
                 break;
+            const float amp = static_cast<float>(ramps_.gain[n]) * v.velocity;
 
             const float filterEnvLevel = dsp::adsrTick(v.filterEnv, filterEnv_);
 
@@ -407,21 +472,21 @@ void Engine::renderVoices(float* left, float* right, int numSamples)
                     auto& phases = v.phase[k];
                     const double increment = baseIncrement[k] * pitchRatio / steps;
 
-                    if (o.level > 0.0) {
+                    if (o.level > 0.0 || ramps_.level[k][n] > 0.0) {
                         const double pulseWidth =
                             pulseWidthOffset != 0.0 ? std::clamp(o.pulseWidth + pulseWidthOffset, 0.05, 0.95) : o.pulseWidth;
                         double sumL = 0.0, sumR = 0.0;
                         for (std::size_t u = 0; u < static_cast<std::size_t>(unisonCount_); ++u) {
                             const double inc = std::min(kMaxPhaseIncrement, increment * unisonRatio_[u]);
                             const double s = dsp::oscSample(o.wave, phases[u], inc, pulseWidth);
-                            sumL += unisonLeft_[u] * s;
-                            sumR += unisonRight_[u] * s;
+                            sumL += ramps_.left[u][n] * s;
+                            sumR += ramps_.right[u][n] * s;
                             phases[u] += inc;
                             if (phases[u] >= 1.0)
                                 phases[u] -= 1.0;
                         }
-                        sL += o.level * unisonGain_ * sumL;
-                        sR += o.level * unisonGain_ * sumR;
+                        sL += ramps_.level[k][n] * ramps_.unisonGain[n] * sumL;
+                        sR += ramps_.level[k][n] * ramps_.unisonGain[n] * sumR;
                     } else {
                         // Silent oscillators keep running so their phase stays in step.
                         for (std::size_t u = 0; u < static_cast<std::size_t>(unisonCount_); ++u) {
@@ -437,17 +502,17 @@ void Engine::renderVoices(float* left, float* right, int numSamples)
             double mixL = stepL[0], mixR = stepR[0];
             if (oversample_) {
                 mixL = v.decimator[0].process(stepL[0], stepL[1], decimatorTaps);
-                mixR = stereoVoices_ ? v.decimator[1].process(stepR[0], stepR[1], decimatorTaps) : mixL;
+                mixR = v.stereo ? v.decimator[1].process(stepR[0], stepR[1], decimatorTaps) : mixL;
             }
 
-            if (noiseLevel_ > 0.0) {
-                const double noise = noiseLevel_ * nextNoise(v.noiseState);
+            if (ramps_.noise[n] > 0.0) {
+                const double noise = ramps_.noise[n] * nextNoise(v.noiseState);
                 mixL += noise;
                 mixR += noise;
             }
 
             const double outL = dsp::svfTick(v.filter[0], coeffs, filterType_, mixL);
-            const double outR = stereoVoices_ ? dsp::svfTick(v.filter[1], coeffs, filterType_, mixR) : outL;
+            const double outR = v.stereo ? dsp::svfTick(v.filter[1], coeffs, filterType_, mixR) : outL;
 
             left[i] += static_cast<float>(outL) * env * amp * ampMod;
             right[i] += static_cast<float>(outR) * env * amp * ampMod;
@@ -455,7 +520,7 @@ void Engine::renderVoices(float* left, float* right, int numSamples)
 
         // While the voice is mono, keep the right filter (and decimator) in
         // step with the left so nothing jumps if unison spread is turned up mid-note.
-        if (!stereoVoices_) {
+        if (!v.stereo) {
             v.filter[1] = v.filter[0];
             v.decimator[1] = v.decimator[0];
         }

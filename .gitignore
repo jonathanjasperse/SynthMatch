@@ -32,3 +32,6 @@ Thumbs.db
 
 # Personal notes: the guide, launch plan, roadmap and ML course (not published)
 notes/
+
+# Claude Code local state (worktrees, settings)
+.claude/

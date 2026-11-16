@@ -83,6 +83,9 @@ private:
         std::uint32_t noiseState = 1;
         std::uint32_t lfoNoiseState = 1;
         std::uint64_t startOrder = 0;
+        // Renders the right channel separately. Once on it stays on for the
+        // note, so turning the stereo spread down glides instead of snapping.
+        bool stereo = false;
     };
 
     struct OscSettings {
@@ -104,6 +107,29 @@ private:
     void updateDerived();
     void updateEffects();
     void renderVoices(float* left, float* right, int numSamples);
+    void renderVoiceChunk(float* left, float* right, int numSamples);
+    void snapGlide();
+
+    // Levels that would click if they jumped (gain, oscillator and noise
+    // levels, unison level and panning) glide to new settings over a few
+    // milliseconds. gain_, oscs_[k].level, noiseLevel_, unisonGain_ and
+    // unisonLeft_/unisonRight_ are the targets; glide_ holds where each one is
+    // now. Settings made while no voice sounds apply at once.
+    static constexpr int kChunk = 64;
+    struct Glide {
+        double gain = 1.0, noise = 0.0, unisonGain = 1.0;
+        std::array<double, param::kNumOscs> level{};
+        std::array<double, kMaxUnison> left{}, right{};
+    };
+    Glide glide_;
+    double glideCoeff_ = 1.0; // per sample: a 5 ms time constant
+    // Every sample's glided values for the chunk being rendered, shared by all voices.
+    struct GlideRamps {
+        std::array<double, kChunk> gain{}, noise{}, unisonGain{};
+        std::array<std::array<double, kChunk>, param::kNumOscs> level{};
+        std::array<std::array<double, kChunk>, kMaxUnison> left{}, right{};
+    };
+    GlideRamps ramps_;
 
     double sampleRate_ = 48000.0;
     bool oversample_ = true;

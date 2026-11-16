@@ -642,6 +642,77 @@ void testVoiceStealing()
     CHECK(engine.activeVoiceCount() == 0);
 }
 
+// Largest sample-to-sample step in a range, a simple click detector.
+float largestStep(const std::vector<float>& x, std::size_t from, std::size_t to)
+{
+    float worst = 0.0f;
+    for (std::size_t i = std::max<std::size_t>(from, 1); i < std::min(to, x.size()); ++i)
+        worst = std::max(worst, std::abs(x[i] - x[i - 1]));
+    return worst;
+}
+
+void testNoClicks()
+{
+    const double sr = 48000.0;
+    auto quietSine = defaultValues();
+    quietSine[param::Osc1Wave] = static_cast<float>(Wave::Sine);
+    quietSine[param::GainDb] = -12.0f;
+    quietSine[param::ReverbOn] = 0.0f;
+    quietSine[param::AmpAttackMs] = 1.0f;
+
+    // A gain change mid-note glides over a few milliseconds instead of jumping.
+    {
+        Engine engine;
+        engine.prepare(sr);
+        engine.setParams(quietSine);
+        engine.noteOn(57, 1.0f);
+        std::vector<float> a(4800), b(4800), r(4800);
+        engine.process(a.data(), r.data(), 4800);
+        engine.setParam(param::GainDb, 0.0f);
+        engine.process(b.data(), r.data(), 4800);
+        const float before = peak(a, 2400, 4800), after = peak(b, 2400, 4800);
+        CHECK(after > 3.5f * before);                   // it did get 12 dB louder...
+        CHECK(peak(b, 0, 24) < before * 1.6f);          // ...but not within the first half millisecond
+        CHECK(largestStep(b, 0, 48) < 2.0f * largestStep(a, 2400, 4800));
+    }
+
+    // Stealing a voice that is still playing carries its waveform on instead of
+    // restarting it at full level.
+    {
+        Engine engine;
+        engine.prepare(sr);
+        auto p = quietSine;
+        p[param::GainDb] = -24.0f;
+        engine.setParams(p);
+        for (int n = 0; n < Engine::kMaxVoices; ++n)
+            engine.noteOn(24 + 2 * n, 1.0f); // low notes, so the waveform moves slowly
+        std::vector<float> a(4800), b(480), r(4800);
+        engine.process(a.data(), r.data(), 4800);
+        engine.noteOn(24, 1.0f); // every voice is held: the oldest (this note) is taken
+        engine.process(b.data(), r.data(), 480);
+        CHECK(engine.activeVoiceCount() == Engine::kMaxVoices);
+        CHECK(largestStep(b, 0, 64) < 1.5f * largestStep(a, 2400, 4800) + 0.01f);
+    }
+
+    // Three oscillators in a wide unison stack are as loud on the left as on the right.
+    {
+        auto p = sawPatch();
+        p[param::ReverbOn] = 0.0f;
+        p[param::Osc2Level] = 1.0f;
+        p[param::Osc3Level] = 1.0f;
+        p[param::UnisonVoices] = 3.0f;
+        p[param::UnisonSpread] = 1.0f;
+        p[param::UnisonDetune] = 10.0f;
+        const auto audio = renderNote(p, 57, 1.0, 0.0, sr);
+        double l = 0.0, r = 0.0;
+        for (std::size_t i = at(0.2, sr); i < at(1.0, sr); ++i) {
+            l += static_cast<double>(audio.left[i]) * audio.left[i];
+            r += static_cast<double>(audio.right[i]) * audio.right[i];
+        }
+        CHECK_NEAR(toDb(l / r), 0.0, 1.5);
+    }
+}
+
 void testExtremeNotes()
 {
     // The highest and lowest notes with every waveform must stay finite and bounded.
@@ -1713,6 +1784,7 @@ int main(int argc, char** argv)
     testEnvelopeInEngine();
     testSustainZeroFreesVoice();
     testVoiceStealing();
+    testNoClicks();
     testExtremeNotes();
     testFilterResponse();
     testFilterInEngine();
