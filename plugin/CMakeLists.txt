@@ -55,16 +55,42 @@ target_sources(SynthMatch PRIVATE
 
 target_include_directories(SynthMatch PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# The trained encoder ships inside the plugin, so matching works with no
-# extra files. Train it with synthmatch_train (see the README).
+# Files built into the plugin, so it needs nothing else at run time.
+set(SYNTHMATCH_BINARY_DATA "")
+
+# The trained encoder, so matching works with no extra files. Train it with
+# synthmatch_train (see the README).
 set(SYNTHMATCH_ENCODER_FILE "${PROJECT_SOURCE_DIR}/models/encoder.smm")
 if(EXISTS "${SYNTHMATCH_ENCODER_FILE}")
-    juce_add_binary_data(SynthMatchData SOURCES "${SYNTHMATCH_ENCODER_FILE}")
-    set_target_properties(SynthMatchData PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    target_link_libraries(SynthMatch PRIVATE SynthMatchData)
+    list(APPEND SYNTHMATCH_BINARY_DATA "${SYNTHMATCH_ENCODER_FILE}")
     target_compile_definitions(SynthMatch PRIVATE SYNTHMATCH_HAS_ENCODER=1)
 else()
     message(STATUS "models/encoder.smm not found: the plugin will match without the encoder")
+endif()
+
+# The background: your own tile image and its settings, if present in
+# plugin/assets (see plugin/assets/README.md). Without a tile.png the drawn
+# metal pentagon is used. CONFIGURE_DEPENDS makes every build look again, so
+# adding or deleting tile.png needs no manual CMake run.
+file(GLOB SYNTHMATCH_ASSETS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/*.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets/*.json")
+set(SYNTHMATCH_TILE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/assets/tile.png")
+if("${SYNTHMATCH_TILE_FILE}" IN_LIST SYNTHMATCH_ASSETS)
+    list(APPEND SYNTHMATCH_BINARY_DATA "${SYNTHMATCH_TILE_FILE}")
+    target_compile_definitions(SynthMatch PRIVATE SYNTHMATCH_HAS_TILE=1)
+    message(STATUS "Background tile: plugin/assets/tile.png")
+endif()
+set(SYNTHMATCH_BACKDROP_FILE "${CMAKE_CURRENT_SOURCE_DIR}/assets/backdrop.json")
+if("${SYNTHMATCH_BACKDROP_FILE}" IN_LIST SYNTHMATCH_ASSETS)
+    list(APPEND SYNTHMATCH_BINARY_DATA "${SYNTHMATCH_BACKDROP_FILE}")
+    target_compile_definitions(SynthMatch PRIVATE SYNTHMATCH_HAS_BACKDROP_SETTINGS=1)
+endif()
+
+if(SYNTHMATCH_BINARY_DATA)
+    juce_add_binary_data(SynthMatchData SOURCES ${SYNTHMATCH_BINARY_DATA})
+    set_target_properties(SynthMatchData PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_link_libraries(SynthMatch PRIVATE SynthMatchData)
 endif()
 
 target_compile_definitions(SynthMatch PUBLIC

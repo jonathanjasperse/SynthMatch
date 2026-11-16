@@ -1,4 +1,6 @@
 *.f32 binary
 *.smm binary
+*.png binary
+*.blend binary
 *.sh text eol=lf
 packaging/macos/assistant-scripts/* text eol=lf

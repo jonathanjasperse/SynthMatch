@@ -45,6 +45,10 @@ private:
     theme::MetalLookAndFeel lookAndFeel_;
     juce::Image backdrop_;
     float backdropScale_ = 0.0f;
+    // While SYNTHMATCH_TILE or SYNTHMATCH_BACKDROP names a file, redraw the
+    // background whenever it is saved again (see plugin/assets/README.md).
+    juce::String designStamp_;
+    std::unique_ptr<juce::TimedCallback> designWatch_;
 
     ui::IconButton add_{"", ui::IconButton::Icon::Plus};
     ui::IconButton open_{"", ui::IconButton::Icon::Open};

@@ -143,7 +143,9 @@ Read [docs/ROADMAP.md](ROADMAP.md) Stage 5 and 6, then follow `matchSound` in
   the message thread: loading files, running the match and the language model
   on background threads, undo, presets, the terminal.
 - [plugin/ui/](../plugin/ui): the interface. `Theme` (colours, knobs),
-  `Backdrop` (the pentagons), `MainView`, `NodeView`, `Terminal`.
+  `Backdrop` (the tiled background), `MainView`, `NodeView`, `Terminal`.
+- [plugin/assets/](../plugin/assets): your own background tile (a PNG from
+  Blender) and its settings; see the README there.
 
 ### The rules, and why
 

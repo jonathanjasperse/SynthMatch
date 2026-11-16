@@ -14,6 +14,10 @@ CMakeUserPresets.json
 # Renders and audio scratch files
 *.wav
 
+# Blender's automatic backups (the .blend itself is fine to commit)
+*.blend1
+*.blend2
+
 # Python (later stages)
 __pycache__/
 *.pyc

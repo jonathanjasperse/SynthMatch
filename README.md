@@ -196,6 +196,7 @@ assist/   the assistant: built-in rules, the edit format, and the prompt and
           answer handling for a language model. Plain C++20.
 plugin/   JUCE plugin (VST3, Standalone, AU on macOS): the interface, and
           Session, which runs matching and the assistant in the background.
+          plugin/assets: your background tile and its Blender scene.
 tools/    command-line tools (below)
 packaging/  installer scripts (Inno Setup for Windows, pkgbuild for macOS)
 scripts/  one-step build-test-package scripts
@@ -230,6 +231,13 @@ your DAW doesn't scan that Windows folder, add it to the DAW's VST3 paths once.
 
 Built plugins end up in `build/plugin/SynthMatch_artefacts/Release/` (`VST3/`,
 `Standalone/`, and `AU/` on macOS).
+
+### Your own background tile
+
+The tiled shape in the background can be your own image: render a PNG (there's
+a ready-made Blender scene), put it at `plugin/assets/tile.png` and build. Set
+`SYNTHMATCH_TILE` to see each render in the standalone app as you make it.
+Step by step: [plugin/assets/README.md](plugin/assets/README.md).
 
 ## Command-line tools
 

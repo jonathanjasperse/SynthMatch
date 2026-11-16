@@ -20,3 +20,9 @@ target_link_libraries(synthmatch_host
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
+
+# Hosting Audio Units on macOS uses Apple's CoreAudioKit (for the generic
+# plugin view), which JUCE doesn't link by itself for a console app.
+if(APPLE)
+    target_link_libraries(synthmatch_host PRIVATE "-framework CoreAudioKit")
+endif()

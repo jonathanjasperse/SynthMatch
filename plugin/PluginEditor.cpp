@@ -63,6 +63,19 @@ SynthMatchEditor::SynthMatchEditor(SynthMatchProcessor& processor)
     showNodes(session_.showNodes);
     changeListenerCallback(nullptr);
 
+    designStamp_ = theme::designFilesStamp();
+    if (designStamp_.isNotEmpty()) {
+        designWatch_ = std::make_unique<juce::TimedCallback>([this] {
+            const auto stamp = theme::designFilesStamp();
+            if (stamp != designStamp_) {
+                designStamp_ = stamp;
+                backdrop_ = {};
+                repaint();
+            }
+        });
+        designWatch_->startTimer(1000);
+    }
+
     const auto dir = juce::SystemStats::getEnvironmentVariable("SYNTHMATCH_SNAPSHOT_DIR", {});
     if (dir.isNotEmpty()) {
         snapshotDir_ = juce::File(dir);

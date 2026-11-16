@@ -252,7 +252,14 @@ void MainView::paint(juce::Graphics& g)
 void MainView::paintEmpty(juce::Graphics& g, juce::Rectangle<float> area)
 {
     const auto c = area.getCentre().translated(0.0f, -38.0f);
-    theme::drawGem(g, c, 36.0f, 1.0f, 0.9f);
+    // Your tile, at full strength and about as big as the drawn gem.
+    constexpr float iconSize = 84.0f;
+    const float pixelScale = static_cast<float>(g.getInternalContext().getPhysicalPixelScaleFactor());
+    if (const auto tile = theme::tileIcon(juce::roundToInt(iconSize * pixelScale)); tile.isValid()) {
+        g.drawImage(tile, juce::Rectangle<float>(iconSize, iconSize).withCentre(c), juce::RectanglePlacement::centred);
+    } else {
+        theme::drawGem(g, c, 36.0f, 1.0f, 0.9f);
+    }
 
     g.setColour(theme::colour::textHi);
     g.setFont(theme::light(24.0f));
