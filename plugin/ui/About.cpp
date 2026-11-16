@@ -71,7 +71,7 @@ void About::paint(juce::Graphics& g)
     paragraph(juce::String::fromUTF8("Copyright \xc2\xa9 2026 Bedrot Audio. SynthMatch is free software: you can "
                                      "redistribute it and change it under the terms of the GNU Affero General Public "
                                      "License, version 3 or later. It comes with ABSOLUTELY NO WARRANTY. The source code "
-                                     "is at github.com/BedrotAudio/ml-synthmatch."),
+                                     "is at github.com/jonathanjasperse/SynthMatch."),
               theme::sans(12.5f), theme::colour::textDim, 14);
     paragraph("Built with JUCE. It includes zlib, HarfBuzz, SheenBidi, LunaSVG, PlutoVG, libpng, the Independent JPEG "
               "Group's library, libwebp, FLAC, Ogg, Vorbis, Opus, the VST3 SDK and Apple's Audio Unit SDK. Their "

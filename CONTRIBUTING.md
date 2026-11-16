@@ -39,8 +39,7 @@ Open an issue with:
 4. Open a pull request saying what changed and why. CI builds and tests it on
    Windows, macOS and Linux.
 
-The project's rules are in [CLAUDE.md](CLAUDE.md). The ones reviewers will check
-most closely:
+The project's rules, the ones reviewers will check most closely:
 
 - **The engine, matcher and assistant stay free of JUCE**, so they run in the
   tools and tests.
@@ -49,6 +48,10 @@ most closely:
 - **Parameter ids never change.** New parameters go at the end of the table.
 - **A sound change comes with regenerated golden renders**, and an explanation
   of why the sound changed.
+- **Changing the search space or the encoder's features means retraining**
+  `models/encoder.smm` with `synthmatch_train` (the loader rejects a stale one).
+- **The assistant only talks to the model server in its settings**, which is
+  this computer by default. Nothing is sent to a remote service by default.
 
 ## Licence
 

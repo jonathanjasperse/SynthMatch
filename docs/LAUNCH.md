@@ -241,7 +241,7 @@ Prices change; check them when you buy.
 
 ## What can be done in this repo next
 
-These are ready to pick up, by you or with Claude:
+These are ready to pick up:
 
 1. `LICENSE`, `THIRD_PARTY_NOTICES.txt`, and an About box.
 2. Parameter smoothing and click-free voice stealing (also exercise E4 in the guide).

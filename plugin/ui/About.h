@@ -9,7 +9,7 @@
 
 namespace ui {
 
-inline constexpr const char* kSourceUrl = "https://github.com/BedrotAudio/ml-synthmatch";
+inline constexpr const char* kSourceUrl = "https://github.com/jonathanjasperse/SynthMatch";
 inline constexpr const char* kLicenceUrl = "https://www.gnu.org/licenses/agpl-3.0.html";
 
 class About : public juce::Component {

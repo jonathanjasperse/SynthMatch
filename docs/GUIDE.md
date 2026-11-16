@@ -178,7 +178,7 @@ Read [docs/ROADMAP.md](ROADMAP.md) Stage 5 and 6, then follow `matchSound` in
 
 ### The rules, and why
 
-These are in [CLAUDE.md](../CLAUDE.md). The ones that bite:
+The full list is in [CONTRIBUTING.md](../CONTRIBUTING.md). The ones that bite:
 
 - **Real-time safety.** The audio thread must finish each block in a few
   milliseconds, every time. Allocating memory or waiting on a lock can take
