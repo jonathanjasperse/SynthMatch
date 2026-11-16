@@ -29,6 +29,15 @@ struct TrainOptions {
     int threads = 0;                  // 0 = one per CPU core
     std::uint32_t seed = 1;
     double sampleRate = 24000.0;      // the rate the matcher searches at
+    // Prepare each note's input the way matching prepares a recording: find
+    // the notes first and listen to the one found (which can be off a little),
+    // instead of the true note. Held-back validation notes use the true note.
+    bool detectNotes = true;
+    // Make most training notes sound more like recordings: now and then a
+    // gentle EQ tilt, a little saturation, a small room or a noise floor. The
+    // answer stays the same, so the network learns to hear past them.
+    // Validation notes stay clean.
+    bool augment = true;
 
     // Real recordings with an approved answer: the encoder's input for the
     // recording (from encoderInputFor) and the preset that matched it well,

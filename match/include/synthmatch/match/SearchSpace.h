@@ -24,8 +24,12 @@ struct SearchDim {
     // Extended dimensions (unison, LFO, delay, reverb) are searched after the
     // core sound (oscillators, filter, envelopes) has been found.
     bool extended = false;
+    // A continuous dimension can cover less than the parameter's whole range:
+    // from `lo` to `hi`, in the parameter's units (both 0: the whole range).
+    float lo = 0.0f, hi = 0.0f;
 
     bool isChoice() const { return !choices.empty(); }
+    bool hasRange() const { return hi > lo; }
     float toValue(double x) const;        // x in [0, 1]
     double fromValue(float value) const;  // the middle of the matching choice's slot
     std::size_t choiceIndex(float value) const; // nearest choice
@@ -44,6 +48,14 @@ struct SearchSpace {
 
     static const SearchSpace& standard();
 };
+
+// How far the matcher may detune oscillators 2 and 3 from their interval, and
+// spread the unison voices, in cents. The parameters go much further, but wide
+// settings sound out of tune and rarely match a recording better, so the
+// search (and the training sounds) stay within these. Changing them keeps the
+// trained encoder loadable; retrain so its guesses fit the new range.
+inline constexpr float kMaxOscDetuneCents = 15.0f;
+inline constexpr float kMaxUnisonDetuneCents = 35.0f;
 
 // The gain used for every candidate render. The matcher works out the right
 // gain afterwards by comparing levels, so it never has to search for it.

@@ -4,6 +4,7 @@
 #include "synthmatch/dsp/Lfo.h"
 #include "synthmatch/dsp/Oscillator.h"
 #include "synthmatch/match/Features.h"
+#include "synthmatch/match/Matcher.h"
 #include "synthmatch/match/Parallel.h"
 
 #include <algorithm>
@@ -11,7 +12,9 @@
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
+#include <numbers>
 #include <numeric>
+#include <vector>
 
 namespace synthmatch::match {
 
@@ -299,6 +302,73 @@ double meanLoss(const Mlp& net, const SearchSpace& space, const Dataset& data, s
     return std::accumulate(chunkLoss.begin(), chunkLoss.end(), 0.0) / static_cast<double>(to - from);
 }
 
+// Makes a clean render sound a little more like a recording: now and then a
+// gentle EQ tilt, some saturation, a small room or a low noise floor. The
+// preset (the answer) stays the same, so the network learns to hear past them.
+void augment(StereoBuffer& audio, std::uint32_t seed)
+{
+    Rng rng(seed * 2654435761u + 977u);
+    const double sr = audio.sampleRate;
+    float peak = 0.0f;
+    for (const auto* channel : {&audio.left, &audio.right})
+        for (const float v : *channel)
+            peak = std::max(peak, std::abs(v));
+    if (peak <= 1.0e-6f)
+        return;
+
+    // Tilt: a few dB more or less above about 1 kHz.
+    if (rng.chance(0.5)) {
+        const double tilt = rng.range(-0.3, 0.4);
+        const double a = std::exp(-2.0 * std::numbers::pi * 1000.0 / sr);
+        for (auto* channel : {&audio.left, &audio.right}) {
+            double low = 0.0;
+            for (auto& v : *channel) {
+                low = (1.0 - a) * v + a * low;
+                v = static_cast<float>(low + (1.0 + tilt) * (v - low));
+            }
+        }
+    }
+
+    // Saturation: soft clipping, as from a driven preamp or tape.
+    if (rng.chance(0.3)) {
+        const double drive = rng.range(1.2, 3.5), norm = std::tanh(drive);
+        for (auto* channel : {&audio.left, &audio.right})
+            for (auto& v : *channel)
+                v = static_cast<float>(peak * std::tanh(drive * v / peak) / norm);
+    }
+
+    // A small room: four feedback echoes (a Schroeder comb bank), mixed in quietly.
+    if (rng.chance(0.3)) {
+        const double size = rng.range(0.5, 1.0), wet = rng.range(0.05, 0.2), decaySec = rng.range(0.2, 0.6);
+        const std::size_t n = audio.numFrames();
+        std::vector<float> room(n, 0.0f);
+        for (const double ms : {29.7, 37.1, 41.1, 43.7}) {
+            const auto delay = std::max<std::size_t>(1, static_cast<std::size_t>(ms * size * 0.001 * sr));
+            const double feedback = std::pow(10.0, -3.0 * (static_cast<double>(delay) / sr) / decaySec); // -60 dB after decaySec
+            std::vector<float> line(delay, 0.0f);
+            std::size_t pos = 0;
+            for (std::size_t i = 0; i < n; ++i) {
+                const float out = line[pos];
+                line[pos] = static_cast<float>(0.5 * (audio.left[i] + audio.right[i]) + feedback * out);
+                pos = pos + 1 == delay ? 0 : pos + 1;
+                room[i] += 0.25f * out;
+            }
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            audio.left[i] += static_cast<float>(wet * room[i]);
+            audio.right[i] += static_cast<float>(wet * room[i]);
+        }
+    }
+
+    // A noise floor 40 to 70 dB below the peak.
+    if (rng.chance(0.5)) {
+        const double level = peak * std::pow(10.0, rng.range(-70.0, -40.0) / 20.0);
+        for (auto* channel : {&audio.left, &audio.right})
+            for (auto& v : *channel)
+                v += static_cast<float>(level * (2.0 * rng.uniform() - 1.0));
+    }
+}
+
 } // namespace
 
 RandomSound randomSound(const SearchSpace& space, std::uint32_t seed)
@@ -326,7 +396,8 @@ RandomSound randomSound(const SearchSpace& space, std::uint32_t seed)
         const double coarse = intervals[rng.pick({0.04, 0.2, 0.4, 0.08, 0.2, 0.04, 0.04})];
         set(param::osc(k, param::OscCoarse), coarse);
         // At the same pitch as oscillator 1 a detune is typical; otherwise it's small.
-        set(param::osc(k, param::OscFine), coarse == 0.0 ? rng.range(-30.0, 30.0) : rng.range(-8.0, 8.0));
+        const double detune = coarse == 0.0 ? kMaxOscDetuneCents : std::min(8.0, double{kMaxOscDetuneCents});
+        set(param::osc(k, param::OscFine), rng.range(-detune, detune));
     }
     set(param::NoiseLevel, rng.chance(0.2) ? rng.logRange(0.02, 0.6) : 0.0);
 
@@ -363,7 +434,7 @@ RandomSound randomSound(const SearchSpace& space, std::uint32_t seed)
     // Unison.
     const double voices[] = {1.0, 2.0, 3.0, 5.0, 7.0};
     set(param::UnisonVoices, voices[rng.pick({0.6, 0.1, 0.12, 0.1, 0.08})]);
-    set(param::UnisonDetune, rng.range(3.0, 50.0));
+    set(param::UnisonDetune, rng.range(3.0, double{kMaxUnisonDetuneCents}));
 
     // LFO: usually off; vibrato and filter movement are the common uses.
     const auto target = static_cast<dsp::LfoTarget>(rng.pick({0.65, 0.12, 0.12, 0.06, 0.05}));
@@ -450,19 +521,35 @@ TrainResult trainEncoder(const TrainOptions& options)
             " times).");
     }
 
-    log("Rendering " + std::to_string(options.samples) + " training notes on " + std::to_string(threads) + " threads...");
+    // The last `validation` notes are held back to measure progress.
+    const auto validation = static_cast<std::size_t>(static_cast<double>(options.samples) * options.validationFraction);
+
+    log("Rendering " + std::to_string(options.samples) + " training notes on " + std::to_string(threads) + " threads" +
+        (options.detectNotes ? ", listening for the notes as matching does" : "") +
+        (options.augment ? ", with recording-like extras" : "") + "...");
     std::atomic<std::size_t> done{0};
     parallelFor(options.samples, threads, [&](std::size_t k) {
         if (cancelled())
             return;
         const std::size_t i = extraTotal + k;
-        const RandomSound sound = randomSound(space, options.seed * 1000003u + static_cast<std::uint32_t>(k));
+        const std::uint32_t seed = options.seed * 1000003u + static_cast<std::uint32_t>(k);
+        const RandomSound sound = randomSound(space, seed);
         RenderSettings settings;
         settings.sampleRate = options.sampleRate;
         settings.tailSec = sound.seconds - sound.note.durationSec;
         const NoteEvent notes[] = {sound.note};
-        const auto audio = render(sound.params, notes, settings);
-        const auto features = encoderFeatures(toMono(audio.left, audio.right), options.sampleRate, sound.note);
+        auto audio = render(sound.params, notes, settings);
+
+        // Held-back notes stay clean and use the true note, so the validation
+        // loss stays comparable between runs.
+        const bool heldBack = k >= options.samples - validation;
+        if (options.augment && !heldBack)
+            augment(audio, seed);
+        std::vector<float> features;
+        if (options.detectNotes && !heldBack)
+            features = encoderInputFor(audio);
+        if (features.size() != encoderFeatureCount()) // no note found: use the true one
+            features = encoderFeatures(toMono(audio.left, audio.right), options.sampleRate, sound.note);
         std::copy(features.begin(), features.end(), data.features.begin() + static_cast<std::ptrdiff_t>(i * data.inputs));
         makeTargets(space, sound.params, data.targets.data() + i * data.outputs, data.mask.data() + i * data.outputs);
         ++done;
@@ -475,7 +562,6 @@ TrainResult trainEncoder(const TrainOptions& options)
         log(line);
     }
 
-    const auto validation = static_cast<std::size_t>(static_cast<double>(options.samples) * options.validationFraction);
     const std::size_t trainCount = data.count - validation; // the last `validation` examples are held back
     if (trainCount < options.batchSize) {
         log("Not enough samples to train.");

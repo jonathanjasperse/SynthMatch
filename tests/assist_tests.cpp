@@ -149,6 +149,15 @@ void testRulesVocabulary()
     CHECK(v(after("turn off the reverb", p), param::ReverbOn) == 0.0f);
     CHECK(v(after("make it drier", p), param::ReverbMix) < 0.3f);
     CHECK(v(after("make it sound like a cathedral", p), param::ReverbDecaySec) > v(p, param::ReverbDecaySec));
+    // More of a reverb that's on also lengthens its tail, by how much was asked for.
+    const float tail = v(p, param::ReverbDecaySec);
+    CHECK_NEAR(v(after("more reverb", p), param::ReverbDecaySec), tail * 1.25f, 1e-3);
+    CHECK_NEAR(v(after("a bit more reverb", p), param::ReverbDecaySec), tail * 1.125f, 1e-3);
+    CHECK(v(after("a lot more reverb", p), param::ReverbDecaySec) > v(after("more reverb", p), param::ReverbDecaySec));
+    CHECK(v(after("make it wetter", p), param::ReverbDecaySec) > tail);
+    // Adding reverb that was off starts from its usual tail; less reverb leaves the tail.
+    CHECK(v(wet, param::ReverbDecaySec) == v(dry, param::ReverbDecaySec));
+    CHECK(v(after("less reverb", p), param::ReverbDecaySec) == tail);
 
     // Other effects and character.
     const auto delayed = after("add some delay", dry);

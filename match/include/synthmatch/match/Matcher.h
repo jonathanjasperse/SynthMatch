@@ -36,9 +36,12 @@ struct MatchProgress {
 
 struct MatchOptions {
     double maxSeconds = 4.0;  // how much of the recording to use
-    int budget = 3000;        // how many candidate sounds to try
+    int budget = 3000;        // how many candidate sounds to try, per attempt
     int threads = 0;          // 0 = one per CPU core
     std::uint32_t seed = 1;
+    // Independent searches, with seeds seed, seed + 1, ...; the closest wins.
+    // A second attempt often finds a much better sound than the first.
+    int attempts = 1;
     bool fitMatchEq = true;
     const Encoder* encoder = nullptr; // optional trained model for the starting guess
     std::function<void(const MatchProgress&)> onProgress; // called on the calling thread

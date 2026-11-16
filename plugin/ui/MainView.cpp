@@ -139,7 +139,7 @@ void IconButton::paintButton(juce::Graphics& g, bool highlighted, bool down)
 
 MainView::MainView(SynthMatchProcessor& processor, Session& session) : processor_(processor), session_(session)
 {
-    for (auto* b : {&playReference_, &playSynth_, &matchAgain_, &stop_, &choose_})
+    for (auto* b : {&playReference_, &playSynth_, &matchAgain_, &stop_, &choose_, &replace_})
         addAndMakeVisible(*b);
 
     playReference_.onClick = [this] {
@@ -160,10 +160,12 @@ MainView::MainView(SynthMatchProcessor& processor, Session& session) : processor
         if (onChooseFile)
             onChooseFile();
     };
+    replace_.onClick = choose_.onClick;
 
     playReference_.setTooltip("Listen to the recording");
     playSynth_.setTooltip("Play the same notes through the synth");
-    matchAgain_.setTooltip("Search again, from a different starting point");
+    matchAgain_.setTooltip("Search again with new starting points; keeps whichever sound is closer");
+    replace_.setTooltip("Match a different recording (or drop a file anywhere on the window)");
     stop_.setTooltip("Stop searching and keep the closest sound so far");
 
     session_.addChangeListener(this);
@@ -191,6 +193,7 @@ void MainView::updateButtons()
     const bool has = session_.hasReference();
     const bool running = session_.matchState() == Session::MatchState::Running;
     choose_.setVisible(!has);
+    replace_.setVisible(has);
     playReference_.setVisible(has);
     playSynth_.setVisible(has && !running);
     matchAgain_.setVisible(has && !running);
@@ -219,6 +222,11 @@ void MainView::resized()
     stop_.setBounds(second);
 
     choose_.setBounds(juce::Rectangle<int>(170, 36).withCentre(leftCard_.toNearestInt().getCentre().translated(0, 96)));
+
+    // At the end of the recording's name row (see paintReference).
+    const auto inner = leftCard_.toNearestInt().reduced(22, 18);
+    const int replaceWidth = replace_.idealWidth();
+    replace_.setBounds(juce::Rectangle<int>(replaceWidth, 28).withCentre({inner.getRight() - replaceWidth / 2, inner.getY() + 22 + 16}));
 }
 
 void MainView::mouseUp(const juce::MouseEvent& e)
@@ -288,7 +296,9 @@ void MainView::paintReference(juce::Graphics& g, juce::Rectangle<float> card)
                header, juce::Justification::centredRight, false);
     g.setFont(theme::light(22.0f));
     g.setColour(theme::colour::textHi);
-    g.drawText(ref.file.getFileNameWithoutExtension(), area.removeFromTop(32.0f), juce::Justification::centredLeft, true);
+    auto nameRow = area.removeFromTop(32.0f);
+    nameRow.removeFromRight(static_cast<float>(replace_.getWidth() + 12)); // the Replace button
+    g.drawText(ref.file.getFileNameWithoutExtension(), nameRow, juce::Justification::centredLeft, true);
     area.removeFromTop(10.0f);
 
     // Waveform, with the matched part lit.

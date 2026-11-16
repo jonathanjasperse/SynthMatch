@@ -23,7 +23,8 @@ void printUsage()
         "  --out PATH       preset file to write (default: matched.json)\n"
         "  --render PATH    also render the matched preset playing the same notes\n"
         "  --model PATH     trained encoder model (.smm) for the starting guess\n"
-        "  --budget N       how many candidate sounds to try (default: 3000)\n"
+        "  --budget N       how many candidate sounds to try, per attempt (default: 3000)\n"
+        "  --attempts N     independent searches, the closest kept (default: 1)\n"
         "  --seconds S      how much of the recording to use (default: 4)\n"
         "  --threads N      CPU threads (default: all but one)\n"
         "  --seed N         random seed (default: 1)\n"
@@ -86,6 +87,8 @@ int main(int argc, char** argv)
             options.threads = std::atoi(value);
         else if (arg == "--seed")
             options.seed = static_cast<std::uint32_t>(std::atoi(value));
+        else if (arg == "--attempts")
+            options.attempts = std::clamp(std::atoi(value), 1, 16);
         else
             return fail("unknown option " + std::string(arg) + " (see --help)");
     }

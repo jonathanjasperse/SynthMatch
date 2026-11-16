@@ -179,7 +179,18 @@ double filteredSawError(const ParamValues& p, int note, double expectedCutoffHz)
     const auto audio = renderNote(p, note, 1.0, 0.0, sr);
     const std::vector<double> steady(audio.left.begin() + static_cast<std::ptrdiff_t>(at(0.5, sr)),
                                      audio.left.begin() + static_cast<std::ptrdiff_t>(at(1.0, sr)));
-    const auto raw = runOsc(Wave::Saw, hz / sr, steady.size());
+
+    // The oscillator as the engine plays it: at twice the rate, filtered back
+    // down (skipping the decimator's start-up).
+    const std::size_t warm = dsp::kDecimatorTaps;
+    const auto fast = runOsc(Wave::Saw, hz / (2.0 * sr), 2 * (steady.size() + warm));
+    dsp::Decimator decimator;
+    std::vector<double> raw;
+    for (std::size_t i = 0; i < steady.size() + warm; ++i) {
+        const double y = decimator.process(fast[2 * i], fast[2 * i + 1], dsp::decimatorTaps());
+        if (i >= warm)
+            raw.push_back(y);
+    }
 
     const auto type = static_cast<FilterType>(static_cast<int>(p[param::FilterType]));
     const double damping = dsp::resonanceToDamping(p[param::FilterResonance]);
@@ -362,6 +373,48 @@ void testOscillatorAliasing()
     CHECK(saw < sawNaive - 40.0);
     CHECK(square < squareNaive - 40.0);
     CHECK(triangle < triangleNaive - 40.0);
+}
+
+void testOversampling()
+{
+    // A saw at C7 (2093 Hz) through the whole engine, filter open. Its 12th to
+    // 17th harmonics lie above half the sample rate and fold back to known
+    // frequencies, each at least 100 Hz from a true harmonic, where a windowed
+    // probe can measure them. Oversampling should cut them a lot.
+    const double sr = 48000.0, f0 = 440.0 * std::pow(2.0, (96 - 69) / 12.0);
+    const auto loudestAlias = [&](bool oversample) {
+        auto p = sawPatch();
+        p[param::FilterCutoffHz] = 20000.0f;
+        const NoteEvent events[] = {{0.0, 0.8, 96, 1.0f}};
+        RenderSettings settings;
+        settings.sampleRate = sr;
+        settings.tailSec = 0.0;
+        settings.oversample = oversample;
+        const auto audio = render(p, events, settings);
+
+        // 0.5 s of the steady part, Blackman-Harris windowed.
+        const std::size_t n = at(0.5, sr), from = at(0.2, sr);
+        std::vector<double> x(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            const double t = 2.0 * kPi * static_cast<double>(i) / static_cast<double>(n);
+            const double w = 0.35875 - 0.48829 * std::cos(t) + 0.14128 * std::cos(2 * t) - 0.01168 * std::cos(3 * t);
+            x[i] = w * audio.left[from + i];
+        }
+        const double fundamental = amplitudeAt(x, f0 / sr);
+        double worst = 0.0;
+        for (int k = 12; k <= 17; ++k) {
+            const double folded = std::abs(k * f0 - sr * std::round(k * f0 / sr));
+            worst = std::max(worst, amplitudeAt(x, folded / sr));
+        }
+        return toDb((worst * worst) / (fundamental * fundamental));
+    };
+
+    const double plain = loudestAlias(false), oversampled = loudestAlias(true);
+    std::printf("loudest alias of a saw at C7 (dB relative to the fundamental): %.1f, oversampled %.1f\n", plain,
+                oversampled);
+    // Measured 2026-11: -36.4 plain and -82.7 oversampled.
+    CHECK(oversampled < -55.0);
+    CHECK(oversampled < plain - 15.0);
 }
 
 // ---------------------------------------------------------------- envelope
@@ -1648,6 +1701,7 @@ int main(int argc, char** argv)
     testSchema();
     testOscillatorHarmonics();
     testOscillatorAliasing();
+    testOversampling();
     testAdsrShape();
     testSilenceWithoutNotes();
     testDeterminism();

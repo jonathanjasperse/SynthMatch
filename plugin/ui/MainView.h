@@ -63,6 +63,7 @@ private:
     IconButton matchAgain_{"Match again", IconButton::Icon::Refresh};
     IconButton stop_{"Stop", IconButton::Icon::Stop};
     IconButton choose_{"Choose a file", IconButton::Icon::Plus};
+    IconButton replace_{"Replace", IconButton::Icon::Plus};
 };
 
 } // namespace ui

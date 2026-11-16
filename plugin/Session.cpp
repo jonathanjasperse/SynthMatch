@@ -18,7 +18,10 @@ namespace {
 
 constexpr int kMaxUndo = 200;
 constexpr double kMaxReferenceSeconds = 60.0;
-constexpr int kMatchBudget = 8000;
+constexpr int kMatchBudget = 8000; // per attempt
+// Independent searches per match, the closest kept. One search can settle on
+// a sound a second one beats easily, so the first match makes several.
+constexpr int kMatchAttempts = 2;
 
 juce::String fromStd(const std::string& s) { return juce::String::fromUTF8(s.c_str()); }
 
@@ -346,13 +349,16 @@ void Session::startMatch()
     auto* j = job.get();
     const auto audio = reference_.audio;
     const auto* encoder = encoder_ ? &*encoder_ : nullptr;
-    const auto seed = matchSeed_++;
+    // Every match, and every Match again, tries seeds not used before.
+    const auto seed = matchSeed_;
+    matchSeed_ += static_cast<std::uint32_t>(kMatchAttempts);
     const auto name = reference_.file.getFileNameWithoutExtension().toStdString();
 
     j->thread = std::thread([this, j, audio, encoder, seed, name] {
         const auto started = std::chrono::steady_clock::now();
         match::MatchOptions options;
         options.budget = kMatchBudget;
+        options.attempts = kMatchAttempts;
         options.seed = seed;
         options.encoder = encoder;
         options.cancel = &j->cancel;
@@ -438,6 +444,16 @@ void Session::finishMatch()
     auto job = std::move(matchJob_);
     if (job->thread.joinable())
         job->thread.join();
+
+    // Searching the same recording again only replaces the match with a closer one.
+    if (job->result.ok && lastMatch_.valid && job->summary.score <= lastMatch_.score) {
+        matchState_ = MatchState::Done;
+        add(LogEntry::Kind::Info, "Searched again (" + juce::String(job->summary.evaluations) +
+                                      " more sounds): nothing closer than the current " +
+                                      juce::String(juce::roundToInt(lastMatch_.score)) + "/100, so it stays.");
+        sendChangeMessage();
+        return;
+    }
 
     lastMatch_ = job->summary;
     if (job->result.ok) {
@@ -901,6 +917,7 @@ void Session::saveState(juce::XmlElement& xml) const
     xml.setAttribute("reference", reference_.file.getFullPathName());
     xml.setAttribute("nodeLayout", nodeLayout);
     xml.setAttribute("showNodes", showNodes);
+    xml.setAttribute("matchSeed", static_cast<int>(matchSeed_));
     if (lastMatch_.valid) {
         xml.setAttribute("matchScore", lastMatch_.score);
         xml.setAttribute("matchEvaluations", lastMatch_.evaluations);
@@ -934,6 +951,7 @@ void Session::timerCallback()
         presetName_ = state->getStringAttribute("presetName", presetName_);
         nodeLayout = state->getStringAttribute("nodeLayout", nodeLayout);
         showNodes = state->getBoolAttribute("showNodes", false);
+        matchSeed_ = static_cast<std::uint32_t>(std::max(1, state->getIntAttribute("matchSeed", 1)));
         const juce::File file(state->getStringAttribute("reference"));
         juce::String error;
         if (file.existsAsFile() && loadReference(file, error, false) && state->hasAttribute("matchScore")) {

@@ -20,6 +20,7 @@
 #include "synthmatch/dsp/Lfo.h"
 #include "synthmatch/dsp/MatchEq.h"
 #include "synthmatch/dsp/Oscillator.h"
+#include "synthmatch/dsp/Oversampling.h"
 #include "synthmatch/dsp/Reverb.h"
 
 #include <array>
@@ -48,6 +49,11 @@ public:
     void setMatchEq(std::span<const float> gainsDb);
     const MatchEqGains& matchEq() const { return matchEqGains_; }
 
+    // Runs the oscillators at twice the sample rate, for far less aliasing (on
+    // by default). Off is cheaper, for quick renders such as the matcher's
+    // search. Set it before playing, not while notes sound.
+    void setOversampling(bool on) { oversample_ = on; }
+
     void setTempo(double bpm);       // for tempo-synced delay; 120 by default
     void setPitchBend(float amount); // -1..1, scaled by the bend_range parameter
 
@@ -66,6 +72,7 @@ private:
         dsp::AdsrState amp;
         dsp::AdsrState filterEnv;
         std::array<dsp::SvfState, 2> filter; // left, right
+        std::array<dsp::Decimator, 2> decimator{}; // the oscillators' oversampling, left and right
         int note = -1;
         float velocity = 0.0f;
         double baseHz = 0.0;
@@ -99,6 +106,7 @@ private:
     void renderVoices(float* left, float* right, int numSamples);
 
     double sampleRate_ = 48000.0;
+    bool oversample_ = true;
     ParamValues params_ = defaultValues();
     MatchEqGains matchEqGains_{};
     double tempoBpm_ = 120.0;

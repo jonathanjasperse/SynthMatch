@@ -26,6 +26,7 @@ struct RenderSettings {
     double tailSec = 1.0; // rendered after the last note-off
     int blockSize = 256;
     double tempoBpm = 120.0; // for tempo-synced delay
+    bool oversample = true;  // see Engine::setOversampling; the matcher's quick search turns it off
 };
 
 struct StereoBuffer {

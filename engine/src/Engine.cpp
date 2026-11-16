@@ -41,6 +41,7 @@ double unisonStartPhase(int osc, int copy)
 void Engine::prepare(double sampleRate)
 {
     sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
+    dsp::decimatorTaps(); // computed here, not on the audio thread
     delay_.prepare(sampleRate_);
     reverb_.prepare(sampleRate_);
     reset();
@@ -252,6 +253,7 @@ void Engine::noteOn(int note, float velocity)
         // envelope state, so it ramps from where it is instead of jumping.
         v.filterEnv = {};
         v.filter = {};
+        v.decimator = {};
     }
     v.amp.gateOn();
     v.filterEnv.gateOn();
@@ -319,6 +321,9 @@ void Engine::process(float* left, float* right, int numSamples)
 
 void Engine::renderVoices(float* left, float* right, int numSamples)
 {
+    const int steps = oversample_ ? 2 : 1;
+    const auto& decimatorTaps = dsp::decimatorTaps();
+
     for (auto& v : voices_) {
         if (!v.amp.active())
             continue;
@@ -392,35 +397,47 @@ void Engine::renderVoices(float* left, float* right, int numSamples)
 
             const double pitchRatio = pitchSemitones != 0.0 ? std::exp2(pitchSemitones / 12.0) : 1.0;
 
-            double mixL = 0.0, mixR = 0.0;
-            for (std::size_t k = 0; k < oscs_.size(); ++k) {
-                const auto& o = oscs_[k];
-                auto& phases = v.phase[k];
-                const double increment = baseIncrement[k] * pitchRatio;
+            // The oscillators, once per sample or (oversampling) twice at half
+            // the step, filtered back down to one.
+            std::array<double, 2> stepL{}, stepR{};
+            for (int step = 0; step < steps; ++step) {
+                double sL = 0.0, sR = 0.0;
+                for (std::size_t k = 0; k < oscs_.size(); ++k) {
+                    const auto& o = oscs_[k];
+                    auto& phases = v.phase[k];
+                    const double increment = baseIncrement[k] * pitchRatio / steps;
 
-                if (o.level > 0.0) {
-                    const double pulseWidth =
-                        pulseWidthOffset != 0.0 ? std::clamp(o.pulseWidth + pulseWidthOffset, 0.05, 0.95) : o.pulseWidth;
-                    double sumL = 0.0, sumR = 0.0;
-                    for (std::size_t u = 0; u < static_cast<std::size_t>(unisonCount_); ++u) {
-                        const double inc = std::min(kMaxPhaseIncrement, increment * unisonRatio_[u]);
-                        const double s = dsp::oscSample(o.wave, phases[u], inc, pulseWidth);
-                        sumL += unisonLeft_[u] * s;
-                        sumR += unisonRight_[u] * s;
-                        phases[u] += inc;
-                        if (phases[u] >= 1.0)
-                            phases[u] -= 1.0;
-                    }
-                    mixL += o.level * unisonGain_ * sumL;
-                    mixR += o.level * unisonGain_ * sumR;
-                } else {
-                    // Silent oscillators keep running so their phase stays in step.
-                    for (std::size_t u = 0; u < static_cast<std::size_t>(unisonCount_); ++u) {
-                        phases[u] += std::min(kMaxPhaseIncrement, increment * unisonRatio_[u]);
-                        if (phases[u] >= 1.0)
-                            phases[u] -= 1.0;
+                    if (o.level > 0.0) {
+                        const double pulseWidth =
+                            pulseWidthOffset != 0.0 ? std::clamp(o.pulseWidth + pulseWidthOffset, 0.05, 0.95) : o.pulseWidth;
+                        double sumL = 0.0, sumR = 0.0;
+                        for (std::size_t u = 0; u < static_cast<std::size_t>(unisonCount_); ++u) {
+                            const double inc = std::min(kMaxPhaseIncrement, increment * unisonRatio_[u]);
+                            const double s = dsp::oscSample(o.wave, phases[u], inc, pulseWidth);
+                            sumL += unisonLeft_[u] * s;
+                            sumR += unisonRight_[u] * s;
+                            phases[u] += inc;
+                            if (phases[u] >= 1.0)
+                                phases[u] -= 1.0;
+                        }
+                        sL += o.level * unisonGain_ * sumL;
+                        sR += o.level * unisonGain_ * sumR;
+                    } else {
+                        // Silent oscillators keep running so their phase stays in step.
+                        for (std::size_t u = 0; u < static_cast<std::size_t>(unisonCount_); ++u) {
+                            phases[u] += std::min(kMaxPhaseIncrement, increment * unisonRatio_[u]);
+                            if (phases[u] >= 1.0)
+                                phases[u] -= 1.0;
+                        }
                     }
                 }
+                stepL[static_cast<std::size_t>(step)] = sL;
+                stepR[static_cast<std::size_t>(step)] = sR;
+            }
+            double mixL = stepL[0], mixR = stepR[0];
+            if (oversample_) {
+                mixL = v.decimator[0].process(stepL[0], stepL[1], decimatorTaps);
+                mixR = stereoVoices_ ? v.decimator[1].process(stepR[0], stepR[1], decimatorTaps) : mixL;
             }
 
             if (noiseLevel_ > 0.0) {
@@ -436,10 +453,12 @@ void Engine::renderVoices(float* left, float* right, int numSamples)
             right[i] += static_cast<float>(outR) * env * amp * ampMod;
         }
 
-        // While the voice is mono, keep the right filter in step with the left
-        // so nothing jumps if unison spread is turned up mid-note.
-        if (!stereoVoices_)
+        // While the voice is mono, keep the right filter (and decimator) in
+        // step with the left so nothing jumps if unison spread is turned up mid-note.
+        if (!stereoVoices_) {
             v.filter[1] = v.filter[0];
+            v.decimator[1] = v.decimator[0];
+        }
     }
 }
 

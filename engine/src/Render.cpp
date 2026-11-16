@@ -36,6 +36,7 @@ StereoBuffer renderImpl(const ParamValues& params, std::span<const float> matchE
 
     Engine engine;
     engine.prepare(sampleRate);
+    engine.setOversampling(settings.oversample);
     engine.setTempo(settings.tempoBpm);
     engine.setParams(params);
     engine.setMatchEq(matchEq);

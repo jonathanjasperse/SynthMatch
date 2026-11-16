@@ -16,7 +16,12 @@ float SearchDim::toValue(double x) const
         const auto index = std::min(choices.size() - 1, static_cast<std::size_t>(x * static_cast<double>(choices.size())));
         return choices[index];
     }
-    return fromNormalized(spec(param), static_cast<float>(x));
+    const auto& s = spec(param);
+    if (hasRange()) {
+        const double a = toNormalized(s, lo), b = toNormalized(s, hi);
+        return fromNormalized(s, static_cast<float>(a + x * (b - a)));
+    }
+    return fromNormalized(s, static_cast<float>(x));
 }
 
 std::size_t SearchDim::choiceIndex(float value) const
@@ -32,7 +37,12 @@ double SearchDim::fromValue(float value) const
 {
     if (isChoice())
         return (static_cast<double>(choiceIndex(value)) + 0.5) / static_cast<double>(choices.size());
-    return toNormalized(spec(param), value);
+    const auto& s = spec(param);
+    if (hasRange()) {
+        const double a = toNormalized(s, lo), b = toNormalized(s, hi);
+        return std::clamp((toNormalized(s, value) - a) / (b - a), 0.0, 1.0);
+    }
+    return toNormalized(s, value);
 }
 
 ParamValues SearchSpace::toParams(std::span<const double> x) const
@@ -69,6 +79,9 @@ const SearchSpace& SearchSpace::standard()
         s.base[param::UnisonSpread] = 0.6f;
 
         const auto continuous = [&](int index, bool extended = false) { s.dims.push_back({index, {}, extended}); };
+        const auto limited = [&](int index, float lo, float hi, bool extended = false) {
+            s.dims.push_back({index, {}, extended, lo, hi});
+        };
         const auto choice = [&](int index, std::vector<float> values, bool extended = false) {
             s.dims.push_back({index, std::move(values), extended});
         };
@@ -85,7 +98,7 @@ const SearchSpace& SearchSpace::standard()
             choice(param::osc(k, param::OscWave), waves);
             continuous(param::osc(k, param::OscLevel));
             choice(param::osc(k, param::OscCoarse), intervals);
-            continuous(param::osc(k, param::OscFine));
+            limited(param::osc(k, param::OscFine), -kMaxOscDetuneCents, kMaxOscDetuneCents);
             continuous(param::osc(k, param::OscPulseWidth));
         }
         continuous(param::NoiseLevel);
@@ -106,7 +119,7 @@ const SearchSpace& SearchSpace::standard()
         continuous(param::AmpReleaseMs);
 
         choice(param::UnisonVoices, {1.0f, 2.0f, 3.0f, 5.0f, 7.0f}, true);
-        continuous(param::UnisonDetune, true);
+        limited(param::UnisonDetune, 0.0f, kMaxUnisonDetuneCents, true);
 
         choice(param::Lfo1Target, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f}, true);
         choice(param::Lfo1Wave, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f}, true);

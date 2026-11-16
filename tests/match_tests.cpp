@@ -597,6 +597,20 @@ void testTrainingAndModelFile()
     // added to training as a graded example.
     const auto input = encoderInputFor(audio);
     CHECK(input.size() == encoderFeatureCount());
+    // Detecting notes and augmenting (both on by default) keep training
+    // deterministic, and switching them off still trains.
+    TrainOptions quick = options;
+    quick.samples = 300;
+    quick.epochs = 1;
+    quick.log = nullptr;
+    const auto first = trainEncoder(quick), second = trainEncoder(quick);
+    CHECK(first.ok && second.ok && first.report.validationLoss == second.report.validationLoss);
+    TrainOptions plain = quick;
+    plain.detectNotes = false;
+    plain.augment = false;
+    const auto clean = trainEncoder(plain);
+    CHECK(clean.ok && clean.report.trainLoss != first.report.trainLoss);
+
     TrainOptions withGraded = options;
     withGraded.samples = 300;
     withGraded.epochs = 1;

@@ -32,7 +32,9 @@ public:
         float gainDb = 0.0f; // the level change that lines the candidate up with the reference
     };
 
-    Objective(std::vector<float> reference, double sampleRate, std::vector<NoteEvent> notes)
+    // `oversample`: render candidates as the plugin plays them. The search
+    // turns it off: twice as fast, at the cost of a little aliasing on high notes.
+    Objective(std::vector<float> reference, double sampleRate, std::vector<NoteEvent> notes, bool oversample = true)
         : audio_(std::move(reference)), sampleRate_(sampleRate), notes_(std::move(notes)),
           analyzer_(sampleRate, configFor(sampleRate)), reference_(analyzer_.analyze(audio_))
     {
@@ -40,6 +42,7 @@ public:
         for (const auto& n : notes_)
             lastOff = std::max(lastOff, n.startSec + n.durationSec);
         settings_.sampleRate = sampleRate_;
+        settings_.oversample = oversample;
         // Render exactly as much as the reference holds.
         settings_.tailSec = std::max(0.0, static_cast<double>(audio_.size()) / sampleRate_ - lastOff);
     }
@@ -443,17 +446,14 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
     // EQ match made, at the full rate.
     const Objective full(section, rate, detection.notes);
     const bool halve = rate >= 44100.0;
-    const Objective search(halve ? decimateBy2(section) : section, halve ? rate / 2.0 : rate, detection.notes);
+    const Objective search(halve ? decimateBy2(section) : section, halve ? rate / 2.0 : rate, detection.notes, false);
 
     const SearchSpace& space = SearchSpace::standard();
-    Search state(space, search, options, options.budget);
 
     // Key tracking can't be heard unless the recording has different pitches.
     bool onePitch = true;
     for (const auto& n : detection.notes)
         onePitch = onePitch && n.note == detection.notes.front().note;
-    if (onePitch)
-        state.disable(param::FilterKeyTrack);
 
     // Starting points: the measured envelope and brightness with each
     // waveform, and the encoder's guess when a trained model is available.
@@ -480,68 +480,109 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
         if (guess.size() == space.dims.size())
             starts.push_back(std::move(guess));
     }
-    const auto startDistances = state.evaluate(starts);
-    result.startDistance = state.bestDistance();
-    result.usedEncoder = startDistances.size() > encoderIndex &&
-                         startDistances[encoderIndex] <= *std::min_element(startDistances.begin(), startDistances.end());
-
-    // The best few starting points that differ from each other (another
-    // waveform, or clearly different settings), so the search explores more
-    // than one family of sounds.
-    std::vector<std::size_t> order(starts.size());
-    for (std::size_t i = 0; i < order.size(); ++i)
-        order[i] = i;
-    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return startDistances[a] < startDistances[b]; });
-    const auto waveDim = static_cast<std::size_t>(0); // osc1_wave is the first dimension
+    // Each attempt is a whole search from those starting points with its own
+    // seed (seed, seed + 1, ...), and the closest result wins. Progress runs
+    // from start to end once, across all of them.
+    const int attempts = std::max(1, options.attempts);
+    std::vector<std::vector<double>> found;
     std::vector<std::size_t> picked;
-    for (const std::size_t i : order) {
-        bool distinct = true;
-        for (const std::size_t j : picked) {
-            double diff = 0.0;
-            for (std::size_t d = 0; d < space.dims.size(); ++d)
-                diff += std::abs(starts[i][d] - starts[j][d]);
-            const bool sameWave = space.dims[waveDim].choiceIndex(space.dims[waveDim].toValue(starts[i][waveDim])) ==
-                                  space.dims[waveDim].choiceIndex(space.dims[waveDim].toValue(starts[j][waveDim]));
-            distinct = distinct && (!sameWave || diff / static_cast<double>(space.dims.size()) > 0.1);
-        }
-        if (distinct)
-            picked.push_back(i);
-        if (picked.size() == 3)
+    double bestSoFar = 1.0e9;
+    int evaluations = 0;
+    for (int a = 0; a < attempts; ++a) {
+        if (a > 0 && options.cancel && options.cancel->load())
             break;
+        MatchOptions attempt = options;
+        attempt.seed = options.seed + static_cast<std::uint32_t>(a);
+        if (options.onProgress) {
+            attempt.onProgress = [&options, a, attempts, bestSoFar](const MatchProgress& p) {
+                const double within = std::clamp((p.fraction - 0.05) / 0.9, 0.0, 1.0);
+                options.onProgress({0.05 + 0.9 * (static_cast<double>(a) + within) / static_cast<double>(attempts),
+                                    std::min(p.distance, bestSoFar), p.stage});
+            };
+        }
+        Search state(space, search, attempt, options.budget);
+        if (onePitch)
+            state.disable(param::FilterKeyTrack);
+
+        const auto startDistances = state.evaluate(starts);
+        if (a == 0) {
+            result.startDistance = state.bestDistance();
+            result.usedEncoder = startDistances.size() > encoderIndex &&
+                                 startDistances[encoderIndex] <= *std::min_element(startDistances.begin(), startDistances.end());
+
+            // The best few starting points that differ from each other (another
+            // waveform, or clearly different settings), so the search explores
+            // more than one family of sounds.
+            std::vector<std::size_t> order(starts.size());
+            for (std::size_t i = 0; i < order.size(); ++i)
+                order[i] = i;
+            std::sort(order.begin(), order.end(),
+                      [&](std::size_t x, std::size_t y) { return startDistances[x] < startDistances[y]; });
+            const auto waveDim = static_cast<std::size_t>(0); // osc1_wave is the first dimension
+            for (const std::size_t i : order) {
+                bool distinct = true;
+                for (const std::size_t j : picked) {
+                    double diff = 0.0;
+                    for (std::size_t d = 0; d < space.dims.size(); ++d)
+                        diff += std::abs(starts[i][d] - starts[j][d]);
+                    const bool sameWave = space.dims[waveDim].choiceIndex(space.dims[waveDim].toValue(starts[i][waveDim])) ==
+                                          space.dims[waveDim].choiceIndex(space.dims[waveDim].toValue(starts[j][waveDim]));
+                    distinct = distinct && (!sameWave || diff / static_cast<double>(space.dims.size()) > 0.1);
+                }
+                if (distinct)
+                    picked.push_back(i);
+                if (picked.size() == 3)
+                    break;
+            }
+        }
+
+        // Stage 1: the core sound, from each of those starts, most effort on
+        // the most promising. Stage 2: everything, from the best so far, with
+        // the core only fine-tuned. Then a final polish.
+        const int remaining = std::max(0, options.budget - state.evaluations());
+        const auto core = state.dims(false), all = state.dims(true);
+        const double shares[] = {0.24, 0.14, 0.10};
+        for (std::size_t k = 0; k < picked.size(); ++k)
+            state.runStage(core, std::vector<double>(core.size(), 0.25), static_cast<int>(shares[k] * remaining),
+                           attempt.seed + 7u * static_cast<std::uint32_t>(k), starts[picked[k]]);
+        state.sweepChoices(core);
+
+        std::vector<double> spread(all.size());
+        for (std::size_t k = 0; k < all.size(); ++k)
+            spread[k] = space.dims[all[k]].extended ? 0.25 : 0.08;
+        state.sweepChoices(all);
+        const int polishBudget = static_cast<int>(0.1 * remaining);
+        state.runStage(all, spread, std::max(0, options.budget - state.evaluations() - polishBudget - 60), attempt.seed + 1);
+        state.sweepChoices(all);
+        state.polish(all, std::max(0, options.budget - state.evaluations()));
+
+        evaluations += state.evaluations();
+        if (!state.best().empty()) {
+            found.push_back(state.best());
+            bestSoFar = std::min(bestSoFar, state.bestDistance());
+        }
     }
 
-    // Stage 1: the core sound, from each of those starts, most effort on the
-    // most promising. Stage 2: everything, from the best so far, with the core
-    // only fine-tuned. Then a final polish.
-    const int remaining = std::max(0, options.budget - state.evaluations());
-    const auto core = state.dims(false), all = state.dims(true);
-    const double shares[] = {0.24, 0.14, 0.10};
-    for (std::size_t k = 0; k < picked.size(); ++k)
-        state.runStage(core, std::vector<double>(core.size(), 0.25), static_cast<int>(shares[k] * remaining),
-                       options.seed + 7u * static_cast<std::uint32_t>(k), starts[picked[k]]);
-    state.sweepChoices(core);
-
-    std::vector<double> spread(all.size());
-    for (std::size_t k = 0; k < all.size(); ++k)
-        spread[k] = space.dims[all[k]].extended ? 0.25 : 0.08;
-    state.sweepChoices(all);
-    const int polishBudget = static_cast<int>(0.1 * remaining);
-    state.runStage(all, spread, std::max(0, options.budget - state.evaluations() - polishBudget - 60), options.seed + 1);
-    state.sweepChoices(all);
-    state.polish(all, std::max(0, options.budget - state.evaluations()));
-
-    if (state.best().empty()) {
+    if (found.empty()) {
         result.error = "The search didn't produce a result.";
         return result;
     }
 
-    // Final check and EQ match at the full sample rate.
-    progress(0.96, state.bestDistance(), "Matching EQ");
+    // Final check and EQ match at the full sample rate, on the closest attempt.
+    progress(0.96, bestSoFar, "Matching EQ");
     Preset preset;
     preset.name = "Matched";
-    preset.params = space.toParams(state.best());
+    preset.params = space.toParams(found.front());
 
     auto score = full.evaluate(preset.params);
+    for (std::size_t i = 1; i < found.size(); ++i) {
+        const auto params = space.toParams(found[i]);
+        const auto other = full.evaluate(params);
+        if (other.distance < score.distance) {
+            score = other;
+            preset.params = params;
+        }
+    }
     const auto applyGain = [&](float gainDb) {
         preset.params[param::GainDb] = clampToRange(spec(param::GainDb), preset.params[param::GainDb] + gainDb);
     };
@@ -562,7 +603,7 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
     }
 
     result.preset = preset;
-    result.evaluations = state.evaluations();
+    result.evaluations = evaluations;
     result.ok = true;
     progress(1.0, result.distance, "Done");
     return result;

@@ -34,6 +34,10 @@ void printUsage()
         "  --hidden N       width of the hidden layers (default: 512)\n"
         "  --threads N      CPU threads (default: all but one)\n"
         "  --seed N         random seed (default: 1)\n"
+        "  --no-detect      give the network the true note, not the one note\n"
+        "                   detection finds (as matching does)\n"
+        "  --no-augment     keep training notes clean (no room, noise, tilt or\n"
+        "                   saturation)\n"
         "\n"
         "Learning from your grades (see tools/grade):\n"
         "  --graded DIR     a graded batch folder; repeatable. Every match you rated\n"
@@ -46,7 +50,9 @@ void printUsage()
         "  --benchmark N    match N random sounds the model has never seen and\n"
         "                   report how close the matcher gets\n"
         "  --model PATH     model to use for the benchmark (omit to test without one)\n"
-        "  --budget N       sounds the matcher may try per match (default: 3000)\n"
+        "  --budget N       sounds the matcher may try per attempt (default: 3000)\n"
+        "  --attempts N     independent searches per match, closest kept (default: 1)\n"
+        "  --seed N         the matcher's random seed (default: 1)\n"
         "  --help           show this message");
 }
 
@@ -119,7 +125,7 @@ int loadGraded(const std::filesystem::path& dir, int minRating, std::vector<Trai
     return used;
 }
 
-int benchmark(int count, const std::string& modelPath, int budget, int threads)
+int benchmark(int count, const std::string& modelPath, int budget, int attempts, std::uint32_t seed, int threads)
 {
     std::optional<Encoder> encoder;
     if (!modelPath.empty()) {
@@ -146,6 +152,8 @@ int benchmark(int count, const std::string& modelPath, int budget, int threads)
 
         MatchOptions options;
         options.budget = budget;
+        options.attempts = attempts;
+        options.seed = seed;
         options.threads = threads;
         options.encoder = encoder ? &*encoder : nullptr;
 
@@ -234,7 +242,8 @@ int main(int argc, char** argv)
 {
     std::string outPath = "models/encoder.smm", modelPath;
     TrainOptions options;
-    int benchmarkCount = 0, budget = 3000, gradedMin = 4;
+    int benchmarkCount = 0, budget = 3000, attempts = 1, gradedMin = 4;
+    std::uint32_t matchSeed = 1;
     std::vector<std::filesystem::path> graded;
 
     for (int i = 1; i < argc; ++i) {
@@ -242,6 +251,14 @@ int main(int argc, char** argv)
         if (arg == "--help" || arg == "-h") {
             printUsage();
             return 0;
+        }
+        if (arg == "--no-detect") {
+            options.detectNotes = false;
+            continue;
+        }
+        if (arg == "--no-augment") {
+            options.augment = false;
+            continue;
         }
         if (i + 1 >= argc)
             return fail(std::string(arg) + " needs a value (see --help)");
@@ -258,7 +275,9 @@ int main(int argc, char** argv)
         else if (arg == "--threads")
             options.threads = std::atoi(value);
         else if (arg == "--seed")
-            options.seed = static_cast<std::uint32_t>(std::atoi(value));
+            options.seed = matchSeed = static_cast<std::uint32_t>(std::atoi(value));
+        else if (arg == "--attempts")
+            attempts = std::clamp(std::atoi(value), 1, 16);
         else if (arg == "--benchmark")
             benchmarkCount = std::max(1, std::atoi(value));
         else if (arg == "--model")
@@ -279,7 +298,7 @@ int main(int argc, char** argv)
         loadGraded(dir, gradedMin, options.extra);
 
     if (benchmarkCount > 0)
-        return benchmark(benchmarkCount, modelPath, budget, options.threads);
+        return benchmark(benchmarkCount, modelPath, budget, attempts, matchSeed, options.threads);
 
     options.log = [](const std::string& line) {
         std::puts(line.c_str());
