@@ -79,6 +79,7 @@ public:
         std::vector<synthmatch::NoteEvent> notes;
         double sectionStartSec = 0.0, sectionSeconds = 0.0; // the part of the reference that was matched
         synthmatch::MatchEqGains referenceSpectrum{}, synthSpectrum{}; // dB per third-octave band
+        std::vector<float> referenceFine, synthFine; // dB per twelfth-octave band, for drawing
         bool hasSpectra = false;
         juce::String error;
     };

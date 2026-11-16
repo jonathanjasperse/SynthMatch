@@ -321,15 +321,21 @@ private:
         g.strokePath(body, juce::PathStrokeType(selected ? 1.3f : 1.0f));
 
         const float alpha = on ? 1.0f : 0.45f;
-        auto inner = r.reduced(11.0f, 8.0f);
+        // Small (in a small window): just the name. Otherwise the name, a
+        // one-line summary and a little picture.
+        const bool roomy = r.getHeight() >= 40.0f && r.getWidth() >= 90.0f;
+        auto inner = r.reduced(roomy ? 11.0f : 8.0f, roomy ? 8.0f : 4.0f);
         g.setFont(theme::caps(10.0f));
         g.setColour(theme::colour::textHi.withAlpha(alpha));
-        g.drawText(n.title, inner.removeFromTop(16.0f), juce::Justification::centredLeft, false);
-        g.setFont(theme::sans(11.5f));
-        g.setColour(theme::colour::textDim.withAlpha(alpha));
-        g.drawText(summary(n), inner.withTrimmedRight(30.0f), juce::Justification::bottomLeft, true);
-
-        drawGlyph(g, n, juce::Rectangle<float>(r.getRight() - 40.0f, r.getBottom() - 26.0f, 30.0f, 16.0f), alpha);
+        if (!roomy) {
+            g.drawText(n.title, inner.withTrimmedRight(16.0f), juce::Justification::centredLeft, true); // clear of the light
+        } else {
+            g.drawText(n.title, inner.removeFromTop(16.0f), juce::Justification::centredLeft, false);
+            g.setFont(theme::sans(11.5f));
+            g.setColour(theme::colour::textDim.withAlpha(alpha));
+            g.drawText(summary(n), inner.withTrimmedRight(30.0f), juce::Justification::bottomLeft, true);
+            drawGlyph(g, n, juce::Rectangle<float>(r.getRight() - 40.0f, r.getBottom() - 26.0f, 30.0f, 16.0f), alpha);
+        }
 
         if (n.power >= 0) {
             const auto light = lightRect(r);

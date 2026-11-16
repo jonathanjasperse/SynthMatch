@@ -192,7 +192,9 @@ void MetalLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Button& but
                                             bool down)
 {
     const auto area = button.getLocalBounds().toFloat().reduced(0.5f);
-    const float radius = area.getHeight() * 0.5f;
+    // Softly rounded rather than a full pill (round icon buttons stay round).
+    const bool square = std::abs(area.getWidth() - area.getHeight()) < 2.0f;
+    const float radius = square ? area.getHeight() * 0.5f : std::min(10.0f, area.getHeight() * 0.3f);
     const bool on = button.getToggleState();
 
     juce::Path shape;

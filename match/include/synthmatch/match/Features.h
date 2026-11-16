@@ -77,6 +77,14 @@ float bestGainDb(const Spectrogram& reference, const Spectrogram& candidate, flo
 // per band in dB. Bands above half the sample rate are set to -200.
 MatchEqGains thirdOctaveSpectrum(std::span<const float> mono, double sampleRate);
 
+// A finer long-term spectrum, for drawing: mean power in dB in bands a twelfth
+// of an octave wide, centred on fineSpectrumHz(i) from 20 Hz up to about
+// 20 kHz. Fine enough to show single harmonics. Bands above 45% of the sample
+// rate are -200.
+inline constexpr int kFineSpectrumBands = 120;
+double fineSpectrumHz(int band);
+std::vector<float> fineSpectrum(std::span<const float> mono, double sampleRate);
+
 // The match EQ band gains that turn `candidate` into `reference`.
 // `maxDb` limits each band; bands where the reference has nothing are left alone.
 MatchEqGains matchEqCurve(const MatchEqGains& referenceDb, const MatchEqGains& candidateDb, double sampleRate,

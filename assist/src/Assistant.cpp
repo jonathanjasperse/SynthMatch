@@ -340,9 +340,12 @@ float convert(int param, const Number& n)
 // ---------------------------------------------------------------- wording
 
 // How strongly to act: "a bit" halves the step, "a lot" doubles it.
-// "More reverb" also makes the tail this much longer (x1.25), scaled by how
-// much more was asked for ("a bit more": x1.125, "a lot more": x1.5).
-constexpr double kReverbTailStep = 0.25;
+// "More reverb" should be clearly more: this much more mix (+25%) and a
+// longer tail (x1.5), scaled the same way ("a bit more": +12.5%, x1.25; "a lot
+// more": +50%, x2). A reverb that was off comes in at a level you can hear.
+constexpr double kReverbMixStep = 0.25;
+constexpr double kReverbTailStep = 0.5;
+constexpr double kReverbStartMix = 0.2; // plus 0.1 x intensity: 30% for a plain "add reverb"
 
 double intensity(const std::string& clause)
 {
@@ -410,6 +413,18 @@ struct Builder {
             set(onParam, 1.0);
     }
 };
+
+// "More reverb" by `amount` (1 = plain, 0.5 = "a bit", 2 = "a lot").
+void moreReverb(Builder& b, double amount)
+{
+    if (b.value(param::ReverbOn) < 0.5f) {
+        b.set(param::ReverbOn, 1.0);
+        b.set(param::ReverbMix, std::max<double>(b.value(param::ReverbMix), std::min(0.6, kReverbStartMix + 0.1 * amount)));
+        return;
+    }
+    b.nudge(param::ReverbMix, kReverbMixStep * amount);
+    b.scale(param::ReverbDecaySec, 1.0 + kReverbTailStep * amount);
+}
 
 // A parameter that belongs to a switchable effect brings the effect's switch with it.
 int switchFor(int param)
@@ -577,18 +592,13 @@ std::string applyWord(Word word, int sign, double amount, const std::string& cla
     case Word::Huge:
         if (a > 0.0) {
             const bool wasOn = b.value(param::ReverbOn) >= 0.5f;
-            b.turnOn(param::ReverbOn);
-            b.nudge(param::ReverbMix, (wasOn ? 0.15 : 0.05) * a);
+            moreReverb(b, a);
             if (word == Word::Huge) {
                 b.nudge(param::ReverbSize, 0.25 * a);
-                b.scale(param::ReverbDecaySec, 1.0 + 0.8 * a);
+                b.scale(param::ReverbDecaySec, 1.0 + 0.5 * a);
                 return "A bigger space.";
             }
-            if (wasOn) {
-                b.scale(param::ReverbDecaySec, 1.0 + kReverbTailStep * a);
-                return "More reverb, with a longer tail.";
-            }
-            return "More reverb.";
+            return wasOn ? "More reverb, with a longer tail." : "Reverb in.";
         }
         b.nudge(param::ReverbMix, 0.15 * a);
         return "Less reverb.";
@@ -1026,17 +1036,20 @@ ClauseResult handle(const std::string& clause, Builder& b)
 
         // "more reverb", "lower the cutoff a bit", "longer release".
         if (dir != 0) {
+            // "More reverb" has its own, bigger steps.
+            if (dir > 0 && index == param::ReverbMix) {
+                moreReverb(b, intensity(rest));
+                result.understood = true;
+                return result;
+            }
             const double step = 0.1 * intensity(rest) * dir;
             enable(dir > 0);
-            // Bringing in an effect that was off starts from a modest level.
+            // Bringing in a delay that was off starts from a modest level.
             const int sw = switchFor(index);
-            if (dir > 0 && sw >= 0 && b.value(sw) < 0.5f && (index == param::ReverbMix || index == param::DelayMix))
+            if (dir > 0 && sw >= 0 && b.value(sw) < 0.5f && index == param::DelayMix)
                 b.nudge(index, 0.3 * step);
             else
                 b.nudge(index, step);
-            // More of a reverb that's already on also rings longer.
-            if (dir > 0 && index == param::ReverbMix && b.value(param::ReverbOn) >= 0.5f)
-                b.scale(param::ReverbDecaySec, 1.0 + kReverbTailStep * intensity(rest));
             result.understood = true;
             return result;
         }
@@ -1269,8 +1282,8 @@ std::string modelSystemPrompt()
            "vibrato: lfo1_target set pitch, lfo1_rate_hz set 5.5, lfo1_depth set 0.12.\n"
            "wobble, movement: lfo1_target set cutoff, lfo1_rate_hz set 2, lfo1_depth set 0.4. Tremolo: lfo1_target set amp.\n"
            "sub, more bass weight: osc3_wave set sine, osc3_coarse set -12, osc3_level set 0.7.\n"
-           "reverb, space, wet, dreamy, distant: reverb_on set on, reverb_mix up, and reverb_decay_s up a little so the tail "
-           "is longer. Big hall: also reverb_size up, reverb_decay_s up more.\n"
+           "reverb, space, wet, dreamy, distant: reverb_on set on, reverb_mix up by a big step (0.25: people want to hear "
+           "it), and reverb_decay_s up so the tail is longer. Big hall: also reverb_size up, reverb_decay_s up more.\n"
            "dry, closer: reverb_mix down, delay_mix down.\n"
            "echo, delay: delay_on set on, delay_mix up.\n"
            "breathy, noisy, airy: noise_level up. Cleaner: noise_level down.\n"
@@ -1283,7 +1296,7 @@ std::string modelSystemPrompt()
            "Request: make it brighter\n"
            "{\"edits\":[{\"param\":\"filter_cutoff_hz\",\"op\":\"nudge\",\"value\":0.15}],\"reply\":\"Opened the filter.\"}\n"
            "Request: add more reverb\n"
-           "{\"edits\":[{\"param\":\"reverb_on\",\"op\":\"set\",\"value\":\"on\"},{\"param\":\"reverb_mix\",\"op\":\"nudge\",\"value\":0.15},"
+           "{\"edits\":[{\"param\":\"reverb_on\",\"op\":\"set\",\"value\":\"on\"},{\"param\":\"reverb_mix\",\"op\":\"nudge\",\"value\":0.25},"
            "{\"param\":\"reverb_decay_s\",\"op\":\"nudge\",\"value\":0.08}],\"reply\":\"More reverb, with a longer tail.\"}\n"
            "Request: darker and a lot wider\n"
            "{\"edits\":[{\"param\":\"filter_cutoff_hz\",\"op\":\"nudge\",\"value\":-0.12},{\"param\":\"unison_voices\",\"op\":\"set\",\"value\":7},"

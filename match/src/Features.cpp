@@ -185,9 +185,11 @@ float bestGainDb(const Spectrogram& reference, const Spectrogram& candidate, flo
     return count > 0 ? static_cast<float>(sum / static_cast<double>(count)) : 0.0f;
 }
 
-MatchEqGains thirdOctaveSpectrum(std::span<const float> mono, double sampleRate)
+namespace {
+
+// Mean power spectrum (Welch's method: Hann-windowed frames, averaged).
+std::vector<double> meanPowerSpectrum(std::span<const float> mono, std::size_t n, std::size_t hop)
 {
-    constexpr std::size_t n = 8192, hop = 2048;
     const Fft fft(n);
     const auto window = hannWindow(n);
 
@@ -207,26 +209,55 @@ MatchEqGains thirdOctaveSpectrum(std::span<const float> mono, double sampleRate)
     if (frames > 0)
         for (auto& v : mean)
             v /= static_cast<double>(frames);
+    return mean;
+}
 
+// Power in dB between lo and hi Hz, counting partly covered bins in proportion.
+float bandPowerDb(const std::vector<double>& mean, double binHz, double lo, double hi)
+{
+    double power = 0.0;
+    const auto first = static_cast<std::size_t>(std::floor(lo / binHz));
+    const auto last = std::min(mean.size() - 1, static_cast<std::size_t>(std::floor(hi / binHz)));
+    for (std::size_t k = first; k <= last; ++k) {
+        const double binLo = (static_cast<double>(k) - 0.5) * binHz, binHi = binLo + binHz;
+        const double overlap = std::max(0.0, std::min(hi, binHi) - std::max(lo, binLo));
+        power += mean[k] * overlap / binHz;
+    }
+    return static_cast<float>(10.0 * std::log10(power + 1.0e-20));
+}
+
+} // namespace
+
+MatchEqGains thirdOctaveSpectrum(std::span<const float> mono, double sampleRate)
+{
+    constexpr std::size_t n = 8192;
+    const auto mean = meanPowerSpectrum(mono, n, 2048);
     const double binHz = sampleRate / static_cast<double>(n);
     MatchEqGains out{};
     for (int band = 0; band < kMatchEqBands; ++band) {
         const double centre = dsp::matchEqBandHz(band);
-        if (centre >= 0.45 * sampleRate) {
-            out[static_cast<std::size_t>(band)] = -200.0f;
-            continue;
-        }
-        // Sum the bins inside the band, counting partly covered bins in proportion.
-        const double lo = centre * std::exp2(-1.0 / 6.0), hi = centre * std::exp2(1.0 / 6.0);
-        double power = 0.0;
-        const auto first = static_cast<std::size_t>(std::floor(lo / binHz));
-        const auto last = std::min(mean.size() - 1, static_cast<std::size_t>(std::floor(hi / binHz)));
-        for (std::size_t k = first; k <= last; ++k) {
-            const double binLo = (static_cast<double>(k) - 0.5) * binHz, binHi = binLo + binHz;
-            const double overlap = std::max(0.0, std::min(hi, binHi) - std::max(lo, binLo));
-            power += mean[k] * overlap / binHz;
-        }
-        out[static_cast<std::size_t>(band)] = static_cast<float>(10.0 * std::log10(power + 1.0e-20));
+        out[static_cast<std::size_t>(band)] =
+            centre >= 0.45 * sampleRate ? -200.0f
+                                        : bandPowerDb(mean, binHz, centre * std::exp2(-1.0 / 6.0), centre * std::exp2(1.0 / 6.0));
+    }
+    return out;
+}
+
+double fineSpectrumHz(int band) { return 20.0 * std::exp2(static_cast<double>(band) / 12.0); }
+
+std::vector<float> fineSpectrum(std::span<const float> mono, double sampleRate)
+{
+    // A long frame (about 3 Hz per bin at 48 kHz), so even the lowest bands,
+    // a few hertz wide, are resolved.
+    const std::size_t n = sampleRate > 60000.0 ? 32768 : 16384;
+    const auto mean = meanPowerSpectrum(mono, n, n / 4);
+    const double binHz = sampleRate / static_cast<double>(n);
+    std::vector<float> out(kFineSpectrumBands, -200.0f);
+    for (int band = 0; band < kFineSpectrumBands; ++band) {
+        const double centre = fineSpectrumHz(band);
+        if (centre < 0.45 * sampleRate)
+            out[static_cast<std::size_t>(band)] =
+                bandPowerDb(mean, binHz, centre * std::exp2(-1.0 / 24.0), centre * std::exp2(1.0 / 24.0));
     }
     return out;
 }

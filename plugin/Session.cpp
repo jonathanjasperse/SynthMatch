@@ -434,8 +434,11 @@ void Session::computeSpectra(MatchSummary& summary, const synthmatch::Preset& pr
     settings.tailSec = std::max(0.0, summary.sectionSeconds - lastOff);
     const auto synth = synthmatch::render(preset, summary.notes, settings);
 
+    const auto synthMono = match::toMono(synth.left, synth.right);
     summary.referenceSpectrum = match::thirdOctaveSpectrum(section, audio->sampleRate);
-    summary.synthSpectrum = match::thirdOctaveSpectrum(match::toMono(synth.left, synth.right), audio->sampleRate);
+    summary.synthSpectrum = match::thirdOctaveSpectrum(synthMono, audio->sampleRate);
+    summary.referenceFine = match::fineSpectrum(section, audio->sampleRate);
+    summary.synthFine = match::fineSpectrum(synthMono, audio->sampleRate);
     summary.hasSpectra = true;
 }
 

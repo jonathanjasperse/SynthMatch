@@ -3,6 +3,7 @@
 #include "PluginProcessor.h"
 #include "Session.h"
 #include "synthmatch/dsp/MatchEq.h"
+#include "synthmatch/match/Features.h"
 #include "ui/Backdrop.h"
 
 #include <cmath>
@@ -411,16 +412,24 @@ void MainView::paintSpectrum(juce::Graphics& g, juce::Rectangle<float> area)
         return;
     }
 
+    // The fine (twelfth-octave) spectra when there are some, else the third-octave ones.
+    const bool fine = last.referenceFine.size() == synthmatch::match::kFineSpectrumBands &&
+                      last.synthFine.size() == synthmatch::match::kFineSpectrumBands;
+    const int bands = fine ? synthmatch::match::kFineSpectrumBands : synthmatch::kMatchEqBands;
+    const auto bandHz = [&](int b) { return fine ? synthmatch::match::fineSpectrumHz(b) : synthmatch::dsp::matchEqBandHz(b); };
+    const auto refDb = [&](int b) { return fine ? last.referenceFine[static_cast<std::size_t>(b)] : last.referenceSpectrum[static_cast<std::size_t>(b)]; };
+    const auto synthDb = [&](int b) { return fine ? last.synthFine[static_cast<std::size_t>(b)] : last.synthSpectrum[static_cast<std::size_t>(b)]; };
+
     float top = -200.0f;
-    for (int b = 0; b < synthmatch::kMatchEqBands; ++b)
-        top = std::max({top, last.referenceSpectrum[static_cast<std::size_t>(b)], last.synthSpectrum[static_cast<std::size_t>(b)]});
-    const float range = 60.0f;
-    const auto curve = [&](const synthmatch::MatchEqGains& db) {
+    for (int b = 0; b < bands; ++b)
+        top = std::max({top, refDb(b), synthDb(b)});
+    const float range = 66.0f;
+    const auto curve = [&](const auto& db) {
         juce::Path p;
         bool started = false;
-        for (int b = 0; b < synthmatch::kMatchEqBands; ++b) {
-            const double hz = synthmatch::dsp::matchEqBandHz(b);
-            const float v = db[static_cast<std::size_t>(b)];
+        for (int b = 0; b < bands; ++b) {
+            const double hz = bandHz(b);
+            const float v = db(b);
             if (hz > 20000.0 || v < -150.0f)
                 continue;
             const float y = graph.getBottom() - graph.getHeight() * juce::jlimit(0.0f, 1.0f, (v - (top - range)) / range);
@@ -431,10 +440,10 @@ void MainView::paintSpectrum(juce::Graphics& g, juce::Rectangle<float> area)
                 p.lineTo(x, y);
             started = true;
         }
-        return p.createPathWithRoundedCorners(6.0f);
+        return fine ? p : p.createPathWithRoundedCorners(6.0f);
     };
 
-    const auto ref = curve(last.referenceSpectrum);
+    const auto ref = curve(refDb);
     juce::Path fill(ref);
     fill.lineTo(graph.getRight(), graph.getBottom());
     fill.lineTo(graph.getX(), graph.getBottom());
@@ -447,7 +456,7 @@ void MainView::paintSpectrum(juce::Graphics& g, juce::Rectangle<float> area)
 
     juce::Path dashed;
     const float dash[] = {4.0f, 3.0f};
-    juce::PathStrokeType(1.4f).createDashedStroke(dashed, curve(last.synthSpectrum), dash, 2);
+    juce::PathStrokeType(1.4f).createDashedStroke(dashed, curve(synthDb), dash, 2);
     g.setColour(theme::colour::textDim);
     g.fillPath(dashed);
 }

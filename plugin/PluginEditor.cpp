@@ -58,7 +58,7 @@ SynthMatchEditor::SynthMatchEditor(SynthMatchProcessor& processor)
     session_.addChangeListener(this);
 
     setResizable(true, true);
-    setResizeLimits(940, 680, 1900, 1300);
+    setResizeLimits(760, 560, 1900, 1300);
     setSize(1120, 780);
     showNodes(session_.showNodes);
     changeListenerCallback(nullptr);
@@ -78,6 +78,11 @@ SynthMatchEditor::SynthMatchEditor(SynthMatchProcessor& processor)
 
     const auto dir = juce::SystemStats::getEnvironmentVariable("SYNTHMATCH_SNAPSHOT_DIR", {});
     if (dir.isNotEmpty()) {
+        // SYNTHMATCH_SNAPSHOT_SIZE=WxH checks the layout at another size.
+        juce::StringArray size;
+        size.addTokens(juce::SystemStats::getEnvironmentVariable("SYNTHMATCH_SNAPSHOT_SIZE", {}), "x", "");
+        if (size.size() == 2 && size[0].getIntValue() > 0 && size[1].getIntValue() > 0)
+            setSize(size[0].getIntValue(), size[1].getIntValue());
         snapshotDir_ = juce::File(dir);
         snapshotDir_.createDirectory();
         snapshotStep_ = 0;
@@ -129,7 +134,9 @@ void SynthMatchEditor::resized()
     top.removeFromLeft(212); // the mark and name
     presetName_.setBounds(top.removeFromLeft(std::min(360, top.getWidth())));
 
-    terminal_->setBounds(area.removeFromBottom(kTerminal).reduced(20, 0).withTrimmedBottom(16));
+    // The terminal gives up some height in a small window.
+    const int terminalHeight = juce::jlimit(140, kTerminal, getHeight() / 4);
+    terminal_->setBounds(area.removeFromBottom(terminalHeight).reduced(20, 0).withTrimmedBottom(16));
     area.removeFromBottom(6);
     main_->setBounds(area);
     nodes_->setBounds(area);

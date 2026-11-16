@@ -139,20 +139,23 @@ void testRulesVocabulary()
     CHECK(v(open, param::EqOn) == 1.0f);
     CHECK(v(open, param::EqHighGainDb) > 0.0f);
 
-    // Reverb.
+    // Reverb. Adding it, or more of it, is clearly audible.
     auto dry = defaultValues();
+    dry[param::ReverbOn] = 0.0f;
+    dry[param::ReverbMix] = 0.1f;
     const auto wet = after("add more reverb", dry);
     CHECK(v(wet, param::ReverbOn) == 1.0f);
-    CHECK(v(wet, param::ReverbMix) > 0.0f);
-    CHECK(v(after("more reverb", p), param::ReverbMix) > 0.3f);
+    CHECK_NEAR(v(wet, param::ReverbMix), 0.3, 1e-6);
+    CHECK_NEAR(v(after("more reverb", p), param::ReverbMix), 0.55, 1e-6);
+    CHECK_NEAR(v(after("a lot more reverb", p), param::ReverbMix), 0.8, 1e-6);
     CHECK(v(after("less reverb", p), param::ReverbMix) < 0.3f);
     CHECK(v(after("turn off the reverb", p), param::ReverbOn) == 0.0f);
     CHECK(v(after("make it drier", p), param::ReverbMix) < 0.3f);
     CHECK(v(after("make it sound like a cathedral", p), param::ReverbDecaySec) > v(p, param::ReverbDecaySec));
     // More of a reverb that's on also lengthens its tail, by how much was asked for.
     const float tail = v(p, param::ReverbDecaySec);
-    CHECK_NEAR(v(after("more reverb", p), param::ReverbDecaySec), tail * 1.25f, 1e-3);
-    CHECK_NEAR(v(after("a bit more reverb", p), param::ReverbDecaySec), tail * 1.125f, 1e-3);
+    CHECK_NEAR(v(after("more reverb", p), param::ReverbDecaySec), tail * 1.5f, 1e-3);
+    CHECK_NEAR(v(after("a bit more reverb", p), param::ReverbDecaySec), tail * 1.25f, 1e-3);
     CHECK(v(after("a lot more reverb", p), param::ReverbDecaySec) > v(after("more reverb", p), param::ReverbDecaySec));
     CHECK(v(after("make it wetter", p), param::ReverbDecaySec) > tail);
     // Adding reverb that was off starts from its usual tail; less reverb leaves the tail.
