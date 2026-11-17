@@ -2,7 +2,8 @@
 
 // The encoder: a small neural network that listens to a note and guesses the
 // preset that made it. It is trained on sounds made by this synth itself
-// (random presets rendered through the engine), so no outside data is needed.
+// (random presets rendered through the engine), so no outside data is needed,
+// plus any recordings a person graded as well matched.
 //
 // Its guess is only the starting point; the search in Matcher.h then refines
 // it. A better-trained encoder means a better start and a closer match in the
@@ -53,7 +54,7 @@ struct Mlp {
     std::size_t outputSize() const { return layers.empty() ? 0 : layers.back().outputs; }
     std::size_t parameterCount() const;
 
-    // Random starting weights for the given layer sizes, e.g. {631, 512, 512, 80}.
+    // Random starting weights for the given layer sizes, e.g. {631, 768, 768, 85}.
     static Mlp create(std::span<const std::size_t> sizes, std::uint32_t seed);
 
     std::vector<float> forward(std::span<const float> input) const;
@@ -64,9 +65,12 @@ public:
     Encoder() = default;
     Encoder(Mlp network, std::vector<float> inputMean, std::vector<float> inputScale);
 
-    // A model file records which parameters it was trained to predict. Loading
-    // fails with a clear message if that no longer matches this build, in which
-    // case the model has to be trained again.
+    // A model file records which parameters it was trained to predict (each
+    // one's id, range and number of choices) and how many inputs it takes.
+    // Loading fails with a clear message if that no longer matches this build,
+    // in which case the model has to be trained again. It can't tell when the
+    // inputs are measured differently but there are still as many of them, or
+    // when the choices' values change: retrain after those too.
     static std::optional<Encoder> load(const std::filesystem::path& path, std::string* error = nullptr);
     static std::optional<Encoder> fromMemory(std::span<const unsigned char> data, std::string* error = nullptr);
     bool save(const std::filesystem::path& path, std::string* error = nullptr) const;

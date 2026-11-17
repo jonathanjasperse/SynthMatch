@@ -41,7 +41,7 @@ struct MatchProgress {
 struct MatchOptions {
     double maxSeconds = 4.0;  // how much of the recording to use
     int budget = 3000;        // how many candidate sounds to try, per attempt
-    int threads = 0;          // 0 = one per CPU core
+    int threads = 0;          // 0 = all CPU cores but one
     std::uint32_t seed = 1;
     // Independent searches, with seeds seed, seed + 1, ...; the closest wins.
     // A second attempt often finds a much better sound than the first.

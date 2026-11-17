@@ -34,7 +34,8 @@ constexpr float kRangeDb = 80.0f;
 // Maps a level in dB (0 = the loudest thing in the clip) to 0..1.
 float unitLevel(float db) { return std::clamp(db, -kRangeDb, 0.0f) / kRangeDb + 1.0f; }
 
-// Maps a modulation rate to 0..1: 0 for none, 0.5 at 5 Hz, 0.5 more per two octaves.
+// Maps a modulation rate to 0..1: 0 for none, 0.5 at 5 Hz, 0.5 more per octave
+// (so 2.5 Hz or slower reads 0, and 10 Hz or faster reads 1).
 float unitRate(double hz)
 {
     return hz > 0.0 ? static_cast<float>(std::clamp(0.5 + 0.5 * std::log2(hz / 5.0), 0.0, 1.0)) : 0.0f;

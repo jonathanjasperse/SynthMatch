@@ -99,12 +99,17 @@ A saved file also holds `matcheq.gains_db`, the 31 band gains of the EQ match.
 
 ## The trained encoder
 
-The network that gives the matcher its first guess is trained on sounds the synth
-renders itself, on the CPU:
+The network that gives the matcher its first guess is trained on the CPU, on
+sounds the synth renders itself plus any recordings you graded as well matched
+(`--graded BATCH`). A quick run:
 
 ```bash
 build/tools/train/Release/synthmatch_train --samples 100000 --epochs 30 --out models/encoder.smm
 ```
+
+The shipped model took a million notes, `--hidden 768 --epochs 10` and one
+graded batch, about six hours. Without `--out` the trainer overwrites
+`models/encoder.smm`.
 
 Most of the time goes into rendering the notes, not training on them. Add
 `--save-data notes.smd` to keep them, and `--load-data notes.smd` trains another
@@ -162,7 +167,9 @@ The project's rules, the ones reviewers will check most closely:
 - **A sound change comes with regenerated golden renders**, and an explanation
   of why the sound changed.
 - **Changing the search space or the encoder's features means retraining**
-  `models/encoder.smm` with `synthmatch_train` (the loader rejects a stale one).
+  `models/encoder.smm` with `synthmatch_train`. The loader rejects a model
+  whose input count or searched settings changed, but not one whose inputs are
+  measured differently, so don't rely on it.
 - **The assistant only talks to the model server in its settings**, which is
   this computer by default. Nothing is sent to a remote service by default.
 
@@ -180,7 +187,9 @@ with `python scripts/make-notices.py`.
 
 ## Training data and recordings
 
-The shipped model learns only from sounds the synth renders itself. If you
+The shipped model learns almost entirely from sounds the synth renders itself,
+plus one graded match of a note from a MiniMoog emulation (the model gets the note's
+measurements and the matched preset, never the audio). If you
 contribute recordings or grades for training, say where the sounds came from and
 confirm you have the right to share them. Don't contribute renders of commercial
 sample libraries or presets you aren't allowed to redistribute.

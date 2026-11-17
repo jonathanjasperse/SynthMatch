@@ -5,8 +5,8 @@
 // The training data is made on the spot: pick a random preset, render one note
 // of it through the engine, measure the note (encoderFeatures), and ask the
 // network to recover the preset from the measurements. Repeat a few tens of
-// thousands of times. No recordings are needed, and everything runs on CPU
-// cores.
+// thousands of times. No recordings are needed (graded ones can be added, see
+// `extra`), and everything runs on CPU cores.
 
 #include "synthmatch/match/Encoder.h"
 
@@ -27,12 +27,14 @@ struct TrainOptions {
     double learningRate = 1.0e-3;
     std::size_t batchSize = 128;
     double validationFraction = 0.05; // held back to measure progress honestly
-    int threads = 0;                  // 0 = one per CPU core
+    int threads = 0;                  // 0 = all CPU cores but one
     std::uint32_t seed = 1;
     double sampleRate = 24000.0;      // the rate the matcher searches at
     // Prepare each note's input the way matching prepares a recording: find
     // the notes first and listen to the one found (which can be off a little),
-    // instead of the true note. Held-back validation notes use the true note.
+    // instead of the true note. Held-back validation notes use the true note,
+    // so the validation loss doesn't include note-detection mistakes and
+    // real matching does a little worse than it suggests.
     bool detectNotes = true;
     // Make most training notes sound more like recordings: now and then a
     // gentle EQ tilt, a little saturation, a small room or a noise floor. The

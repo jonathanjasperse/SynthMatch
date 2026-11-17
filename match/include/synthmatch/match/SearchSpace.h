@@ -52,8 +52,9 @@ struct SearchSpace {
 // How far the matcher may detune oscillators 2 and 3 from their interval, and
 // spread the unison voices, in cents. The parameters go much further, but wide
 // settings sound out of tune and rarely match a recording better, so the
-// search (and the training sounds) stay within these. Changing them keeps the
-// trained encoder loadable; retrain so its guesses fit the new range.
+// search (and the training sounds) stay within these. The model file records
+// each searched range, so changing them makes the trained encoder unloadable:
+// retrain it.
 inline constexpr float kMaxOscDetuneCents = 15.0f;
 inline constexpr float kMaxUnisonDetuneCents = 35.0f;
 

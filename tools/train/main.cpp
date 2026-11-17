@@ -27,7 +27,8 @@ void printUsage()
     std::puts(
         "usage: synthmatch_train [options]\n"
         "\n"
-        "Trains the encoder on notes rendered by the synth itself. CPU only.\n"
+        "Trains the encoder on notes rendered by the synth itself, plus any graded\n"
+        "recordings (--graded). CPU only.\n"
         "\n"
         "  --out PATH       model file to write (default: models/encoder.smm)\n"
         "  --samples N      training notes to render (default: 60000)\n"
