@@ -11,6 +11,7 @@
 #include "synthmatch/match/SearchSpace.h"
 
 #include <algorithm>
+#include <optional>
 #include <array>
 #include <cmath>
 #include <thread>
@@ -58,6 +59,7 @@ public:
     // Without one, the distance is the plain spectral distance.
     void useModulation(const ModulationEstimate& estimate)
     {
+        modulation_ = estimate;
         profile_ = ModulationProfile(estimate, reference_, analyzer_, notes_);
         if (profile_.active())
             smoothedReference_ = profile_.smooth(reference_);
@@ -98,6 +100,7 @@ public:
     const SpectrogramAnalyzer& analyzer() const { return analyzer_; }
     double sampleRate() const { return sampleRate_; }
     const std::vector<NoteEvent>& notes() const { return notes_; }
+    const ModulationEstimate& modulation() const { return modulation_; }
 
 private:
     std::vector<float> audio_;
@@ -106,6 +109,7 @@ private:
     SpectrogramAnalyzer analyzer_;
     Spectrogram reference_;
     RenderSettings settings_;
+    ModulationEstimate modulation_;
     ModulationProfile profile_;
     Spectrogram smoothedReference_;
 };
@@ -487,9 +491,11 @@ void simplify(const Objective& objective, ParamValues& params, const MatchEqGain
         const bool stepped = wave == dsp::LfoWave::Square || wave == dsp::LfoWave::Saw || wave == dsp::LfoWave::Random;
         const double semitones = dsp::kLfoPitchSemitones * depth * depth;
         if (stepped || value(param::Lfo1RateHz) < 2.0f || semitones > 1.0) {
+            // A vibrato measured in the recording stays, as a smooth one.
+            const bool measured = objective.modulation().vibrato.found;
             auto off = params;
             off[param::Lfo1Target] = static_cast<float>(dsp::LfoTarget::Off);
-            if (!tryInstead(off)) {
+            if (measured || !tryInstead(off)) {
                 auto vibrato = params;
                 vibrato[param::Lfo1Wave] = static_cast<float>(dsp::LfoWave::Sine);
                 vibrato[param::Lfo1RateHz] = std::max(value(param::Lfo1RateHz), 2.0f);
@@ -699,6 +705,22 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
             }
         }
     }
+    // Measured vibrato means the pitch really wobbles, which only a pitch LFO
+    // makes (and measured tremolo, the level: an amp LFO). Every start uses
+    // that target and the search keeps it, instead of trading it for a
+    // look-alike at the same rate.
+    std::optional<dsp::LfoTarget> lockedTarget;
+    if (modulation.vibrato.found)
+        lockedTarget = dsp::LfoTarget::Pitch;
+    else if (modulation.tremolo.found)
+        lockedTarget = dsp::LfoTarget::Amp;
+    if (lockedTarget) {
+        for (std::size_t d = 0; d < space.dims.size(); ++d)
+            if (space.dims[d].param == param::Lfo1Target)
+                for (auto& s : starts)
+                    s[d] = space.dims[d].fromValue(static_cast<float>(*lockedTarget));
+    }
+
     // Each attempt is a whole search from those starting points with its own
     // seed (seed, seed + 1, ...), and the closest result wins. Progress runs
     // from start to end once, across all of them.
@@ -722,6 +744,8 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
         Search state(space, search, attempt, options.budget);
         if (onePitch)
             state.disable(param::FilterKeyTrack);
+        if (lockedTarget)
+            state.disable(param::Lfo1Target);
 
         const auto startDistances = state.evaluate(starts);
         if (a == 0) {

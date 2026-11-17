@@ -133,6 +133,7 @@ private:
 
     double sampleRate_ = 48000.0;
     bool oversample_ = true;
+    const std::array<double, dsp::kDecimatorTaps>* decimatorTaps_ = &dsp::decimatorTaps();
     ParamValues params_ = defaultValues();
     MatchEqGains matchEqGains_{};
     double tempoBpm_ = 120.0;

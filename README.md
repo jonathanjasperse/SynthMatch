@@ -34,11 +34,18 @@ shows the two on top of each other.
 
 Not close enough? Hit Match again. It searches from new starting points and only
 swaps in the new sound if it's closer. Replace, next to the file name, loads a
-different recording.
+different recording, and Clear takes it away and keeps the sound you have.
+
+If the match plays an octave off when you send it MIDI from your DAW, use Octave
+− or Octave + under the score. The notes line shows the keys to play (middle C is
+C4, MIDI 60, like most DAWs). SynthMatch already guesses the octave from the
+loudest part of the sound, but a synth with a big sub oscillator can fool it.
 
 Edit opens the node view, where every part of the synth is a node in signal
 order. Click a node to edit it, click empty space to get the main controls back,
-and click a node's light to turn it on or off. Back takes you home.
+and click a node's light to turn it on or off. Back takes you home. Unison has
+its own node for stacking detuned copies, and the reverb has room, chamber, hall,
+plate and vintage modes. There's always a bit of reverb on to start with.
 
 The terminal along the bottom is the assistant. Type what you want in normal
 words, like "darker and a bit wider", "more reverb" or "it should feel

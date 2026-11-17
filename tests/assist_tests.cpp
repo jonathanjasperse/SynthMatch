@@ -108,6 +108,7 @@ void testEdits()
     CHECK(formatValue(param::AmpReleaseMs, 1500.0f) == "1.5 s");
     CHECK(formatValue(param::AmpAttackMs, 20.0f) == "20 ms");
     CHECK(formatValue(param::ReverbMix, 0.4f) == "40%");
+    CHECK(formatValue(param::ReverbBassMult, 1.5f) == "1.5x");
     CHECK(formatValue(param::Osc1Wave, 3.0f) == "square");
     CHECK(formatValue(param::GainDb, -6.0f) == "-6 dB");
     CHECK(describeChange({param::FilterCutoffHz, 900.0f, 2100.0f}) == "Filter Cutoff 900 Hz -> 2.1 kHz");
@@ -159,7 +160,9 @@ void testRulesVocabulary()
         const double mix = v(q, param::ReverbMix);
         return 20.0 * std::log10(std::min(1.0, 2.0 * mix) / std::min(1.0, 2.0 * (1.0 - mix)));
     };
-    const auto touch = defaultValues();
+    auto touch = defaultValues();
+    touch[param::ReverbOn] = 1.0f;
+    touch[param::ReverbMix] = 0.15f; // set here: the default may change
     const auto more1 = after("more reverb", touch);
     const auto more2 = after("more reverb", more1);
     const auto more3 = after("more reverb", more2);

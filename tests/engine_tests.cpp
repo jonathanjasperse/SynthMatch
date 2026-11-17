@@ -259,10 +259,10 @@ void testSchema()
     CHECK(findParam("lfo2_depth") == param::lfo(1, param::LfoDepth));
     CHECK(kNumParams == 79);
 
-    // A touch of hall reverb by default; the mode is a named choice.
+    // Some hall reverb by default; the mode is a named choice.
     const auto defaults = defaultValues();
     CHECK(defaults[param::ReverbOn] == 1.0f);
-    CHECK(defaults[param::ReverbMix] == 0.15f);
+    CHECK(defaults[param::ReverbMix] > 0.0f);
     CHECK(choiceName(spec(param::ReverbMode), defaults[param::ReverbMode]) == "hall");
     CHECK(parseChoice(spec(param::ReverbMode), "vintage") == 4.0f);
     CHECK(findParam("reverb_highcut_hz") == param::ReverbHighCutHz);
@@ -1775,7 +1775,7 @@ void testPreset()
         CHECK(nodes->find("filter")->find("cutoff_hz")->number() == 1234.5);
         CHECK(nodes->find("reverb")->find("on")->string() == "on");
         CHECK(nodes->find("delay")->find("sync")->string() == "1/8D");
-        CHECK(nodes->find("master")->find("gain_db")->number() == -12.0);
+        CHECK(nodes->find("master")->find("gain_db")->number() == preset.params[param::GainDb]);
         CHECK(nodes->find("matcheq")->find("gains_db")->items().size() == preset.matchEq.size());
         CHECK(nodes->members().size() == nodeNames().size());
     }

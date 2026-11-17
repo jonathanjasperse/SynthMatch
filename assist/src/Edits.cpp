@@ -104,6 +104,8 @@ std::string formatValue(int param, float value)
         return number(v, 0) + " cents";
     if (s.unit == "oct")
         return (v > 0.0 ? "+" : "") + number(v, 2) + " oct";
+    if (s.unit == "x")
+        return number(v, 2) + "x";
     if (s.curve == Curve::Stepped)
         return number(v, 0);
     if (s.min == 0.0f && s.max == 1.0f)

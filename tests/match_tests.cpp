@@ -237,6 +237,7 @@ void testPitchAndNotes()
 ParamValues heldSaw()
 {
     auto p = defaultValues();
+    p[param::ReverbOn] = 0.0f; // dry: a reverb tail would smear the wobble being measured
     p[param::Osc1Wave] = static_cast<float>(dsp::Wave::Saw);
     p[param::FilterCutoffHz] = 3000.0f;
     p[param::AmpReleaseMs] = 80.0f;
@@ -467,7 +468,7 @@ void testMatchMovesKey()
 void testSimplify()
 {
     auto p = heldSaw();
-    p[param::GainDb] = -6.0f;
+    p[param::GainDb] = -16.0f; // low enough that the echo's make-up gain stays in range
     const std::vector<NoteEvent> notes{{0.0, 0.8, 45, 1.0f}};
     const auto reference = renderNotes(p, notes, 0.4);
 
@@ -727,7 +728,7 @@ void testMatchRecoversSound()
     // A square-wave bass with a filter sweep. The matcher only hears the audio.
     auto p = defaultValues();
     p[param::ReverbOn] = 0.0f;
-    p[param::GainDb] = -6.0f;
+    p[param::GainDb] = -14.0f; // well inside the gain range, so a found gain at its edge means clipping
     p[param::Osc1Wave] = static_cast<float>(dsp::Wave::Square);
     p[param::FilterCutoffHz] = 900.0f;
     p[param::FilterResonance] = 0.4f;

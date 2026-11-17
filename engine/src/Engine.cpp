@@ -47,7 +47,9 @@ void Engine::prepare(double sampleRate)
 {
     sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
     glideCoeff_ = 1.0 - std::exp(-1.0 / (kGlideSec * sampleRate_));
-    dsp::decimatorTaps(); // computed here, not on the audio thread
+    // Looked up here, once: a function-local static's guard can take a lock
+    // the first time each new thread reaches it, so the audio thread uses this pointer.
+    decimatorTaps_ = &dsp::decimatorTaps();
     delay_.prepare(sampleRate_);
     reverb_.prepare(sampleRate_);
     reset();
@@ -422,7 +424,7 @@ void Engine::renderVoices(float* left, float* right, int numSamples)
 void Engine::renderVoiceChunk(float* left, float* right, int numSamples)
 {
     const int steps = oversample_ ? 2 : 1;
-    const auto& decimatorTaps = dsp::decimatorTaps();
+    const auto& decimatorTaps = *decimatorTaps_;
 
     // Every sample's glided levels, worked out once for all the voices. A
     // value that has (all but) arrived snaps to its target, so a level glided
