@@ -42,6 +42,9 @@ using namespace synthmatch::assist;
 ParamValues midPatch()
 {
     auto p = defaultValues();
+    // Set here rather than taken from the defaults, which may change.
+    p[param::GainDb] = -12.0f;
+    p[param::ReverbDecaySec] = 2.0f;
     p[param::FilterCutoffHz] = 1500.0f;
     p[param::FilterResonance] = 0.3f;
     p[param::ReverbOn] = 1.0f;
@@ -329,6 +332,27 @@ void testModelReply()
     // The preset file's own form.
     reply = parseModelReply(R"({"nodes": {"filter": {"cutoff_hz": 900, "type": "bandpass"}, "reverb": {"on": "on"}}})");
     CHECK(reply && reply->edits.size() == 3);
+
+    // Asked for vibrato, the model's answer always ends up on pitch.
+    {
+        auto wrong = parseModelReply(R"({"edits":[{"param":"lfo1_target","op":"set","value":"amp"},
+                                                  {"param":"lfo1_wave","op":"set","value":"square"}]})");
+        CHECK(wrong.has_value());
+        if (wrong) {
+            reinforceModelReply("give it a dreamy vibrato please", *wrong);
+            auto p = defaultValues();
+            applyEdits(p, wrong->edits);
+            CHECK(v(p, param::Lfo1Target) == static_cast<float>(dsp::LfoTarget::Pitch));
+            CHECK(v(p, param::Lfo1Wave) == static_cast<float>(dsp::LfoWave::Sine));
+            CHECK_NEAR(v(p, param::Lfo1RateHz), 5.5, 1e-6);
+            CHECK(v(p, param::Lfo1Depth) > 0.05f);
+        }
+        auto off = parseModelReply(R"({"edits":[{"param":"lfo1_target","op":"set","value":"off"}]})");
+        if (off) {
+            reinforceModelReply("no vibrato on this one", *off);
+            CHECK(off->edits.size() == 1);
+        }
+    }
 
     // Unknown parameters are skipped. A nudge above 1 is an amount in the
     // parameter's units; smaller nudges are kept to a sensible step.

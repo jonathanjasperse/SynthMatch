@@ -74,4 +74,9 @@ struct ModelReply {
 };
 std::optional<ModelReply> parseModelReply(std::string_view answer, std::string* error = nullptr);
 
+// Holds the model to what the request plainly asked for, where small models
+// slip: "vibrato" always means LFO 1 on pitch (a smooth wave, about 5.5 Hz,
+// a vibrato-sized depth unless the model set its own).
+void reinforceModelReply(std::string_view request, ModelReply& reply);
+
 } // namespace synthmatch::assist

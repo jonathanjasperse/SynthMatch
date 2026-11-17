@@ -52,6 +52,7 @@ struct Session::LlmJob {
     std::atomic<int> received{0};
     assist::Reply fallback;
     llm::Answer answer;
+    std::string request; // what was asked, for checking the answer
 };
 
 struct Session::PullJob {
@@ -340,10 +341,45 @@ juce::String Session::matchStage() const { return matchJob_ ? juce::String(match
 
 double Session::liveDistance() const { return matchJob_ ? matchJob_->distance.load() : lastMatch_.distance; }
 
+bool Session::shiftOctave(int octaves)
+{
+    if (!lastMatch_.valid || octaves == 0 || matchJob_)
+        return false;
+    // moveKey lowers the oscillators by `semitones`; the keys move up by as
+    // much, so the comparison sounds the same.
+    const int semitones = -12 * octaves;
+    const auto direction = juce::String(octaves > 0 ? "higher" : "lower");
+    for (const auto& n : lastMatch_.notes) {
+        if (n.note + semitones < 0 || n.note + semitones > 127) {
+            add(LogEntry::Kind::Error, "The notes can't go any " + direction + ".");
+            return false;
+        }
+    }
+    auto p = preset();
+    if (!match::moveKey(p.params, semitones)) {
+        add(LogEntry::Kind::Error, "The oscillators can't be tuned any " + direction + ".");
+        return false;
+    }
+    juce::StringArray keys;
+    for (auto& n : lastMatch_.notes) {
+        n.note += semitones;
+        keys.add(noteText(n.note));
+    }
+    setPresetNoUndo(p);
+    add(LogEntry::Kind::Info, "Octave " + juce::String(octaves > 0 ? "up" : "down") + ": the preset now plays an octave " +
+                                  direction + " from the same keys. Play " + keys.joinIntoString(" ") +
+                                  " to hear the match.");
+    sendChangeMessage();
+    return true;
+}
+
 void Session::startMatch()
 {
     if (!hasReference() || matchJob_)
         return;
+
+    // A new search replaces the sound: stop whatever is playing.
+    processor_.stopPlayback();
 
     auto job = std::make_unique<MatchJob>();
     auto* j = job.get();
@@ -744,6 +780,7 @@ void Session::submit(const juce::String& rawText)
 
     auto job = std::make_unique<LlmJob>();
     job->fallback = std::move(reply);
+    job->request = text.toStdString();
     auto* j = job.get();
     const auto settings = llmSettings_;
     const bool ollama = probe_.ollama;
@@ -800,11 +837,12 @@ void Session::finishLlm()
     }
 
     std::string error;
-    const auto parsed = assist::parseModelReply(job->answer.text.toStdString(), &error);
+    auto parsed = assist::parseModelReply(job->answer.text.toStdString(), &error);
     if (!parsed) {
         useFallback("The model's answer couldn't be used (" + fromStd(error) + ").");
         return;
     }
+    assist::reinforceModelReply(job->request, *parsed);
 
     auto p = preset();
     if (assist::applyEdits(p.params, parsed->edits).empty() && fallback.action == assist::Reply::Action::Edit) {

@@ -45,7 +45,7 @@ constexpr float kLastDelaySync = static_cast<float>(kDelaySyncNames.size()) - 1.
 // Same order as param::Index. Never reorder or reuse ids: saved presets and
 // trained models refer to parameters by id.
 constexpr std::array<ParamSpec, kNumParams> kSchema{{
-    {"gain_db", "Gain", -60.0f, 12.0f, -12.0f, Curve::Linear, "dB"},
+    {"gain_db", "Gain", -60.0f, 2.0f, -20.0f, Curve::Linear, "dB"},
     {"amp_attack_ms", "Amp Attack", 0.1f, 5000.0f, 5.0f, Curve::Log, "ms"},
     {"amp_release_ms", "Amp Release", 1.0f, 10000.0f, 200.0f, Curve::Log, "ms"},
     {"amp_decay_ms", "Amp Decay", 1.0f, 10000.0f, 200.0f, Curve::Log, "ms"},
@@ -130,10 +130,10 @@ constexpr std::array<ParamSpec, kNumParams> kSchema{{
     {"delay_mod_rate_hz", "Delay Mod Rate", 0.05f, 10.0f, 0.5f, Curve::Log, "Hz"},
     {"delay_mod_depth", "Delay Mod Depth", 0.0f, 1.0f, 0.0f, Curve::Linear, ""},
 
-    {"reverb_on", "Reverb", 0.0f, 1.0f, 0.0f, Curve::Stepped, "", kOffOn},
+    {"reverb_on", "Reverb", 0.0f, 1.0f, 1.0f, Curve::Stepped, "", kOffOn},
     {"reverb_mix", "Reverb Mix", 0.0f, 1.0f, 0.25f, Curve::Linear, ""},
     {"reverb_size", "Reverb Size", 0.0f, 1.0f, 0.5f, Curve::Linear, ""},
-    {"reverb_decay_s", "Reverb Decay", 0.1f, 20.0f, 2.0f, Curve::Log, "s"},
+    {"reverb_decay_s", "Reverb Decay", 0.1f, 20.0f, 4.0f, Curve::Log, "s"},
     {"reverb_damping", "Reverb Damping", 0.0f, 1.0f, 0.4f, Curve::Linear, ""},
     {"reverb_predelay_ms", "Reverb Pre-delay", 0.0f, 200.0f, 10.0f, Curve::Linear, "ms"},
     {"reverb_width", "Reverb Width", 0.0f, 1.0f, 1.0f, Curve::Linear, ""},

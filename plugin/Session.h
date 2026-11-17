@@ -68,6 +68,10 @@ public:
     juce::String matchStage() const;
     double liveDistance() const;
     void startMatch();
+    // Plays the preset `octaves` higher (or lower) from the same keys, for
+    // when MIDI comes out at the wrong octave. The match is moved with it, so
+    // it sounds the same in the comparison. False if it can't go further.
+    bool shiftOctave(int octaves);
     void stopMatch(); // keeps the best sound found so far
     bool hasEncoder() const { return encoder_.has_value(); }
 

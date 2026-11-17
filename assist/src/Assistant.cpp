@@ -1426,4 +1426,34 @@ std::optional<ModelReply> parseModelReply(std::string_view answer, std::string* 
     return reply;
 }
 
+void reinforceModelReply(std::string_view request, ModelReply& reply)
+{
+    const std::string clause = normalise(request);
+    if (!has(clause, "vibrato") || hasAny(clause, {"no vibrato", "without vibrato", "less vibrato", "remove the vibrato",
+                                                   "remove vibrato", "stop the vibrato", "turn off the vibrato"}))
+        return;
+
+    const auto pitch = static_cast<float>(dsp::LfoTarget::Pitch);
+    bool target = false, rate = false, depth = false;
+    for (auto& e : reply.edits) {
+        if (e.param == param::Lfo1Target) {
+            e.op = Edit::Op::Set;
+            e.value = pitch;
+            target = true;
+        } else if (e.param == param::Lfo1Wave) {
+            const auto wave = static_cast<dsp::LfoWave>(static_cast<int>(e.value));
+            if (e.op == Edit::Op::Set && wave != dsp::LfoWave::Sine && wave != dsp::LfoWave::Triangle)
+                e.value = static_cast<float>(dsp::LfoWave::Sine);
+        }
+        rate = rate || e.param == param::Lfo1RateHz;
+        depth = depth || e.param == param::Lfo1Depth;
+    }
+    if (!target)
+        reply.edits.push_back({param::Lfo1Target, Edit::Op::Set, pitch});
+    if (!rate)
+        reply.edits.push_back({param::Lfo1RateHz, Edit::Op::Set, 5.5f});
+    if (!depth)
+        reply.edits.push_back({param::Lfo1Depth, Edit::Op::Set, 0.12f});
+}
+
 } // namespace synthmatch::assist

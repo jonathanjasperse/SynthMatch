@@ -24,6 +24,7 @@
 #define Model "qwen3:1.7b"
 
 [Setup]
+SetupIconFile={#Root}\plugin\assets\SynthMatch.ico
 AppId={{E2A180CA-70CB-4755-BEE3-1439884598A5}
 AppName=SynthMatch
 AppVersion={#AppVersion}

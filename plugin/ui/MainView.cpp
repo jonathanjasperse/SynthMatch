@@ -140,8 +140,12 @@ void IconButton::paintButton(juce::Graphics& g, bool highlighted, bool down)
 
 MainView::MainView(SynthMatchProcessor& processor, Session& session) : processor_(processor), session_(session)
 {
-    for (auto* b : {&playReference_, &playSynth_, &matchAgain_, &stop_, &choose_, &replace_})
+    for (auto* b : {&playReference_, &playSynth_, &matchAgain_, &stop_, &choose_, &replace_, &octaveDown_, &octaveUp_})
         addAndMakeVisible(*b);
+    octaveDown_.onClick = [this] { session_.shiftOctave(-1); };
+    octaveUp_.onClick = [this] { session_.shiftOctave(1); };
+    octaveDown_.setTooltip("MIDI sounds too high? Play the preset an octave lower from the same keys");
+    octaveUp_.setTooltip("MIDI sounds too low? Play the preset an octave higher from the same keys");
 
     playReference_.onClick = [this] {
         if (processor_.isPlayingReference())
@@ -195,6 +199,9 @@ void MainView::updateButtons()
     const bool running = session_.matchState() == Session::MatchState::Running;
     choose_.setVisible(!has);
     replace_.setVisible(has);
+    const bool matched = has && !running && session_.lastMatch().valid;
+    octaveDown_.setVisible(matched);
+    octaveUp_.setVisible(matched);
     playReference_.setVisible(has);
     playSynth_.setVisible(has && !running);
     matchAgain_.setVisible(has && !running);
@@ -228,6 +235,12 @@ void MainView::resized()
     const auto inner = leftCard_.toNearestInt().reduced(22, 18);
     const int replaceWidth = replace_.idealWidth();
     replace_.setBounds(juce::Rectangle<int>(replaceWidth, 28).withCentre({inner.getRight() - replaceWidth / 2, inner.getY() + 22 + 16}));
+
+    // Under the score card's notes line (see paintScore: header 22, score 84, notes 20).
+    auto octaveRow = rightCard_.toNearestInt().reduced(22, 18).withTrimmedTop(22 + 84 + 20 + 2).withHeight(26);
+    octaveDown_.setBounds(octaveRow.removeFromLeft(octaveDown_.idealWidth()));
+    octaveRow.removeFromLeft(6);
+    octaveUp_.setBounds(octaveRow.removeFromLeft(octaveUp_.idealWidth()));
 }
 
 void MainView::mouseUp(const juce::MouseEvent& e)
@@ -508,11 +521,16 @@ void MainView::paintScore(juce::Graphics& g, juce::Rectangle<float> card)
 
     if (last.valid) {
         bigNumber(juce::String(juce::roundToInt(last.score)), "/100");
-        juce::StringArray notes;
-        for (const auto& n : last.notes)
+        // Note names (middle C = C4 = MIDI 60, as in most DAWs) and the MIDI numbers.
+        juce::StringArray notes, numbers;
+        for (const auto& n : last.notes) {
             notes.add(juce::String(noteName(n.note)) + juce::String(n.note / 12 - 1));
-        line(juce::String(last.notes.size()) + (last.notes.size() == 1 ? " note: " : " notes: ") + notes.joinIntoString(" "),
+            numbers.add(juce::String(n.note));
+        }
+        line(juce::String(last.notes.size()) + (last.notes.size() == 1 ? " note: " : " notes: ") + notes.joinIntoString(" ") +
+                 juce::String::fromUTF8("  \xc2\xb7  MIDI ") + numbers.joinIntoString(" "),
              theme::colour::text);
+        area.removeFromTop(30.0f); // the octave buttons
         if (last.evaluations > 0)
             line(juce::String(last.evaluations) + " sounds tried in " + juce::String(last.seconds, 1) + " s", theme::colour::textDim);
         line(last.score >= 70 ? "Close. Fine-tune it with the assistant below." :

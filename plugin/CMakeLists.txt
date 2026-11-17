@@ -17,9 +17,9 @@ endif()
 
 juce_add_plugin(SynthMatch
     PRODUCT_NAME "SynthMatch"
-    COMPANY_NAME "Bedrot Audio"
-    BUNDLE_ID "com.bedrotaudio.synthmatch"
-    PLUGIN_MANUFACTURER_CODE Bdrt
+    COMPANY_NAME "Jonathan Jasperse"
+    BUNDLE_ID "com.jonathanjasperse.synthmatch"
+    PLUGIN_MANUFACTURER_CODE Jjasp
     PLUGIN_CODE Smt1
     IS_SYNTH TRUE
     NEEDS_MIDI_INPUT TRUE
