@@ -39,6 +39,11 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; The VST3 folder under Common Files needs administrator rights.
 PrivilegesRequired=admin
+; A DAW that has the plugin loaded locks it. Setup asks Windows which programs
+; use the files it replaces and offers to close them, but by default it only
+; checks .exe, .dll and .chm files: include the plugin's .vst3 binary too.
+CloseApplications=yes
+CloseApplicationsFilter=*.exe,*.dll,*.chm,*.vst3
 WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
