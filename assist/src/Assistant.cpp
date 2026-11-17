@@ -3,6 +3,7 @@
 #include "synthmatch/dsp/Filter.h"
 #include "synthmatch/dsp/Lfo.h"
 #include "synthmatch/dsp/Oscillator.h"
+#include "synthmatch/dsp/Reverb.h"
 
 #include <algorithm>
 #include <cctype>
@@ -339,14 +340,16 @@ float convert(int param, const Number& n)
 
 // ---------------------------------------------------------------- wording
 
-// How strongly to act: "a bit" halves the step, "a lot" doubles it.
-// "More reverb" should be clearly more: this much more mix (+25%) and a
-// longer tail (x1.5), scaled the same way ("a bit more": +12.5%, x1.25; "a lot
-// more": +50%, x2). A reverb that was off comes in at a level you can hear.
-constexpr double kReverbMixStep = 0.25;
-constexpr double kReverbTailStep = 0.5;
-constexpr double kReverbStartMix = 0.2; // plus 0.1 x intensity: 30% for a plain "add reverb"
+// "More reverb" should be clearly more: each step raises the reverb 6 dB
+// against the dry sound, whatever the mix was ("a bit": 3 dB, "a lot": 12 dB).
+// Above a mix of 0.7 the dry sound would start to fade, so from there the tail
+// grows longer and the room bigger instead. A reverb that was off comes in at
+// about 27%, clearly audible.
+constexpr double kReverbStepDb = 6.0;
+constexpr double kReverbMaxMix = 0.7;
+constexpr double kReverbStartMix = 0.27;
 
+// How strongly to act: "a bit" halves the step, "a lot" doubles it.
 double intensity(const std::string& clause)
 {
     if (hasAny(clause, {"tiny", "tiny bit", "touch", "hair", "smidge", "very slightly", "ever so slightly"}))
@@ -414,16 +417,43 @@ struct Builder {
     }
 };
 
-// "More reverb" by `amount` (1 = plain, 0.5 = "a bit", 2 = "a lot").
-void moreReverb(Builder& b, double amount)
+// The reverb's level against the dry sound, as a ratio, at a mix (the dry/wet
+// law in dsp/Delay.h), and the mix for a ratio.
+double wetRatio(double mix)
 {
-    if (b.value(param::ReverbOn) < 0.5f) {
-        b.set(param::ReverbOn, 1.0);
-        b.set(param::ReverbMix, std::max<double>(b.value(param::ReverbMix), std::min(0.6, kReverbStartMix + 0.1 * amount)));
-        return;
+    return std::min(1.0, 2.0 * mix) / std::max(1.0e-3, std::min(1.0, 2.0 * (1.0 - mix)));
+}
+double mixForRatio(double ratio) { return ratio <= 1.0 ? 0.5 * ratio : 1.0 - 0.5 / ratio; }
+
+// "More reverb" by `amount` (1 = plain, 0.5 = "a bit", 2 = "a lot"), or less
+// when it is negative. Returns what was done.
+std::string moreReverb(Builder& b, double amount)
+{
+    const bool on = b.value(param::ReverbOn) >= 0.5f;
+    const double mix = b.value(param::ReverbMix);
+    double next = mixForRatio(wetRatio(mix) * std::pow(10.0, kReverbStepDb * amount / 20.0));
+    if (amount <= 0.0) {
+        if (!on)
+            return "The reverb is already off.";
+        b.set(param::ReverbMix, next);
+        return "Less reverb.";
     }
-    b.nudge(param::ReverbMix, kReverbMixStep * amount);
-    b.scale(param::ReverbDecaySec, 1.0 + kReverbTailStep * amount);
+    if (!on || mix < 0.05) {
+        b.turnOn(param::ReverbOn);
+        b.set(param::ReverbMix, std::max(mix, std::clamp(kReverbStartMix + 0.05 * (amount - 1.0), 0.2, 0.4)));
+        return "Reverb in.";
+    }
+    const double most = amount >= 3.0 ? 1.0 : kReverbMaxMix; // "as much as possible" may drown the dry sound
+    if (next > most) {
+        // As loud as it should go: make it bigger instead.
+        b.set(param::ReverbMix, std::max(most, mix));
+        b.scale(param::ReverbDecaySec, 1.0 + 0.25 * amount);
+        b.nudge(param::ReverbSize, 0.1 * amount);
+        return "More reverb: a longer tail and a bigger room.";
+    }
+    b.set(param::ReverbMix, next);
+    b.scale(param::ReverbDecaySec, 1.0 + 0.15 * amount);
+    return "More reverb, with a longer tail.";
 }
 
 // A parameter that belongs to a switchable effect brings the effect's switch with it.
@@ -589,21 +619,17 @@ std::string applyWord(Word word, int sign, double amount, const std::string& cla
         b.add(param::EqMid2GainDb, 2.5 * a);
         return a > 0.0 ? "More edge." : "Less edge.";
     case Word::Reverb:
-    case Word::Huge:
-        if (a > 0.0) {
-            const bool wasOn = b.value(param::ReverbOn) >= 0.5f;
-            moreReverb(b, a);
-            if (word == Word::Huge) {
-                b.nudge(param::ReverbSize, 0.25 * a);
-                b.scale(param::ReverbDecaySec, 1.0 + 0.5 * a);
-                return "A bigger space.";
-            }
-            return wasOn ? "More reverb, with a longer tail." : "Reverb in.";
+    case Word::Huge: {
+        const auto said = moreReverb(b, a);
+        if (word == Word::Huge && a > 0.0) {
+            b.nudge(param::ReverbSize, 0.25 * a);
+            b.scale(param::ReverbDecaySec, 1.0 + 0.5 * a);
+            return "A bigger space.";
         }
-        b.nudge(param::ReverbMix, 0.15 * a);
-        return "Less reverb.";
+        return said;
+    }
     case Word::Dry:
-        b.nudge(param::ReverbMix, -0.15 * a);
+        moreReverb(b, -a);
         b.nudge(param::DelayMix, -0.1 * a);
         return a > 0.0 ? "Drier." : "Wetter.";
     case Word::Delay:
@@ -904,6 +930,295 @@ bool applySwitch(const std::string& clause, Builder& b, std::string& said)
     return false;
 }
 
+// ---------------------------------------------------------------- reverb words
+
+// With one of these in a request, sound words shape the reverb rather than the
+// synth: "darker reverb" darkens the tail and leaves the filter alone.
+const std::initializer_list<std::string_view> kReverbNouns = {
+    "reverb", "reverbs", "verb", "tail", "plate", "hall", "chamber", "room reverb", "small room", "ambience", "cathedral"};
+
+enum class ReverbWord {
+    Room, Chamber, Hall, Cathedral, Plate, Vintage, // modes
+    Dark, Warm, Bright, Clean, Muddy,               // tone
+    Lush, Steady, Smooth, Grainy,                   // movement and texture
+    Bigger, Smaller, Longer, Shorter, Wider, Mono,  // size, length and width
+    Shimmer
+};
+
+const Named<ReverbWord> kReverbWords[] = {
+    {ReverbWord::Room, {"room reverb", "small room", "room sound"}},
+    {ReverbWord::Chamber, {"chamber"}},
+    {ReverbWord::Hall, {"hall", "concert hall"}},
+    {ReverbWord::Cathedral, {"cathedral", "church"}},
+    {ReverbWord::Plate, {"plate"}},
+    {ReverbWord::Vintage, {"vintage", "retro", "70s", "80s", "seventies", "eighties", "old school"}},
+    {ReverbWord::Dark, {"darker", "dark", "darken", "duller", "dull", "murky", "murkier", "muffled", "mellow", "mellower"}},
+    {ReverbWord::Warm, {"warmer", "warm", "warmth"}},
+    {ReverbWord::Bright, {"brighter", "bright", "brighten", "airier", "airy", "shinier", "shiny", "sparkly", "crisper",
+                          "crisp", "clearer"}},
+    {ReverbWord::Clean, {"clean up the low end", "clean up", "cleaner", "clean", "tighter low end"}},
+    {ReverbWord::Muddy, {"muddy", "muddier", "mud", "boomy", "boomier"}},
+    {ReverbWord::Lush, {"lush", "lusher", "chorus", "chorused", "chorusy", "swirly", "swirlier", "swirling", "modulated",
+                        "more movement", "movement", "wobbly", "wobble"}},
+    {ReverbWord::Steady, {"steadier", "steady", "stable", "static"}},
+    {ReverbWord::Smooth, {"smoother", "smooth", "denser", "dense", "thicker", "thick", "silky", "diffuse"}},
+    {ReverbWord::Grainy, {"grainy", "grainier", "echoey", "echoy", "sparse", "sparser", "gritty"}},
+    {ReverbWord::Bigger, {"huge", "massive", "enormous", "epic", "cavernous", "bigger", "big", "larger", "large", "giant",
+                          "vast"}},
+    {ReverbWord::Smaller, {"smaller", "small", "tighter", "tight", "compact"}},
+    {ReverbWord::Longer, {"longer", "long", "lengthen", "extend"}},
+    {ReverbWord::Shorter, {"shorter", "short", "shorten"}},
+    {ReverbWord::Wider, {"wider", "wide", "stereo"}},
+    {ReverbWord::Mono, {"mono", "narrower", "narrow"}},
+    {ReverbWord::Shimmer, {"shimmer", "shimmery", "shimmering"}},
+};
+
+// True when a word is negated: "no chorus", "without any shimmer", "shimmer free".
+bool negated(const std::string& clause, std::size_t at, std::size_t length)
+{
+    auto before = words(clause.substr(0, at));
+    while (!before.empty() && (before.back() == "any" || before.back() == "the" || before.back() == "a" ||
+                               before.back() == "more"))
+        before.pop_back();
+    const auto after = words(clause.substr(std::min(clause.size(), at + length)));
+    if (!before.empty() && (before.back() == "no" || before.back() == "not" || before.back() == "without" ||
+                            before.back() == "non"))
+        return true;
+    return !after.empty() && after.front() == "free";
+}
+
+// Reverb modes, tone, movement and size: "plate reverb", "darker reverb",
+// "lush shimmer-free vintage hall". Only for a clause that names the reverb,
+// and has no number in it ("reverb mix 40%" is a plain setting).
+bool applyReverbWords(const std::string& clause, Builder& b, std::string& said)
+{
+    if (!hasAny(clause, kReverbNouns) || findNumber(clause))
+        return false;
+    if (hasAny(clause, {"off", "disable", "disabled", "bypass", "kill", "mute", "ditch"}))
+        return false; // a switch: "turn the plate reverb off"
+
+    // Every reverb word, longest first, skipping any inside a longer one.
+    struct Hit {
+        ReverbWord word;
+        std::string_view phrase;
+        std::size_t at;
+        bool negated;
+    };
+    std::vector<Hit> hits;
+    for (const auto& [word, names] : kReverbWords)
+        for (const auto name : names)
+            if (const std::size_t at = findPhrase(clause, name); at != std::string::npos)
+                hits.push_back({word, name, at, negated(clause, at, name.size())});
+    std::stable_sort(hits.begin(), hits.end(), [](const Hit& x, const Hit& y) { return x.phrase.size() > y.phrase.size(); });
+    std::vector<Hit> found;
+    for (const auto& h : hits) {
+        bool overlaps = false;
+        for (const auto& f : found)
+            overlaps = overlaps || (h.at < f.at + f.phrase.size() && f.at < h.at + h.phrase.size()) || h.word == f.word;
+        if (!overlaps)
+            found.push_back(h);
+    }
+    std::sort(found.begin(), found.end(), [](const Hit& x, const Hit& y) { return x.at < y.at; });
+    if (found.empty())
+        return false; // "more reverb", "reverb size": the usual rules
+    const auto named = [&](ReverbWord w) {
+        return std::any_of(found.begin(), found.end(), [&](const Hit& h) { return h.word == w && !h.negated; });
+    };
+
+    const std::size_t first = b.edits.size();
+    const double amount = intensity(clause);
+    const int sign = hasAny(clause, {"remove", "lose", "take out", "get rid of"}) ? -1 : polarity(clause);
+    const double a = amount * sign;
+    std::vector<std::string> notes;
+    const auto atLeast = [&](int param, double v) {
+        if (b.value(param) < v)
+            b.set(param, v);
+    };
+    const auto atMost = [&](int param, double v) {
+        if (b.value(param) > v)
+            b.set(param, v);
+    };
+
+    // The mode: the most particular one named ("vintage hall" is vintage, sized like a hall).
+    std::optional<dsp::ReverbMode> mode;
+    if (named(ReverbWord::Vintage))
+        mode = dsp::ReverbMode::Vintage;
+    else if (named(ReverbWord::Plate))
+        mode = dsp::ReverbMode::Plate;
+    else if (named(ReverbWord::Chamber))
+        mode = dsp::ReverbMode::Chamber;
+    else if (named(ReverbWord::Room))
+        mode = dsp::ReverbMode::Room;
+    else if (named(ReverbWord::Hall) || named(ReverbWord::Cathedral))
+        mode = dsp::ReverbMode::Hall;
+    if (mode) {
+        b.set(param::ReverbMode, static_cast<double>(*mode));
+        notes.push_back(std::string(choiceName(spec(param::ReverbMode), static_cast<float>(*mode))) + " reverb");
+    }
+    if (named(ReverbWord::Hall)) {
+        atLeast(param::ReverbSize, 0.6);
+        atLeast(param::ReverbDecaySec, 2.5);
+    }
+    if (named(ReverbWord::Cathedral)) {
+        atLeast(param::ReverbSize, 0.85);
+        atLeast(param::ReverbDecaySec, 4.5);
+        atLeast(param::ReverbMix, 0.35);
+    }
+    if (named(ReverbWord::Room)) {
+        atMost(param::ReverbSize, 0.5);
+        atMost(param::ReverbDecaySec, 1.2);
+    }
+    if (named(ReverbWord::Plate)) {
+        const float decay = b.value(param::ReverbDecaySec);
+        if (decay < 1.2f || decay > 3.5f)
+            b.set(param::ReverbDecaySec, 2.2);
+    }
+    if (named(ReverbWord::Vintage)) {
+        // Dark, with a slow, deep chorus in the tail.
+        atLeast(param::ReverbDamping, 0.5);
+        atMost(param::ReverbHighCutHz, 9000.0);
+        atLeast(param::ReverbModDepth, 0.5);
+    }
+
+    for (const auto& h : found) {
+        // Negated words are skipped, except that "no chorus" means steadier.
+        if (h.negated && h.word != ReverbWord::Lush)
+            continue;
+        const double s = h.negated ? -amount : a;
+        switch (h.word) {
+        case ReverbWord::Dark:
+        case ReverbWord::Warm:
+        case ReverbWord::Bright: {
+            const double t = h.word == ReverbWord::Bright ? s : -s; // + is brighter
+            b.nudge(param::ReverbHighCutHz, 0.15 * t);
+            b.nudge(param::ReverbDamping, -0.15 * t);
+            if (h.word == ReverbWord::Warm)
+                b.scale(param::ReverbBassMult, 1.0 + 0.15 * s);
+            notes.push_back(t > 0.0 ? "brighter" : "darker");
+            break;
+        }
+        case ReverbWord::Clean:
+        case ReverbWord::Muddy:
+            if ((h.word == ReverbWord::Clean) == (s > 0.0)) {
+                atLeast(param::ReverbLowCutHz, 200.0);
+                b.scale(param::ReverbBassMult, 0.8);
+                notes.push_back("less muddy");
+            } else {
+                b.nudge(param::ReverbLowCutHz, -0.2 * std::abs(s));
+                b.scale(param::ReverbBassMult, 1.0 + 0.25 * std::abs(s));
+                notes.push_back("fuller lows");
+            }
+            break;
+        case ReverbWord::Lush:
+        case ReverbWord::Steady: {
+            const double t = h.word == ReverbWord::Lush ? s : -s;
+            b.nudge(param::ReverbModDepth, 0.2 * t);
+            notes.push_back(t > 0.0 ? "more movement in the tail" : "a steadier tail");
+            break;
+        }
+        case ReverbWord::Smooth:
+        case ReverbWord::Grainy: {
+            const double t = h.word == ReverbWord::Smooth ? s : -s;
+            b.nudge(param::ReverbDiffusion, t > 0.0 ? 0.15 * t : 0.2 * t);
+            notes.push_back(t > 0.0 ? "smoother" : "grainier");
+            break;
+        }
+        case ReverbWord::Bigger:
+        case ReverbWord::Smaller: {
+            const double t = h.word == ReverbWord::Bigger ? s : -s;
+            b.nudge(param::ReverbSize, 0.25 * t);
+            b.scale(param::ReverbDecaySec, t > 0.0 ? 1.0 + 0.4 * t : 1.0 / (1.0 - 0.4 * t));
+            if (t > 0.0) {
+                moreReverb(b, 0.5 * t);
+                // A huge space isn't a room.
+                const auto now = static_cast<dsp::ReverbMode>(static_cast<int>(b.value(param::ReverbMode)));
+                if (!mode && (now == dsp::ReverbMode::Room || now == dsp::ReverbMode::Chamber))
+                    b.set(param::ReverbMode, static_cast<double>(dsp::ReverbMode::Hall));
+            }
+            notes.push_back(t > 0.0 ? "a bigger space" : "a smaller space");
+            break;
+        }
+        case ReverbWord::Longer:
+        case ReverbWord::Shorter: {
+            const double t = h.word == ReverbWord::Longer ? s : -s;
+            b.scale(param::ReverbDecaySec, t > 0.0 ? 1.0 + 0.5 * t : 1.0 / (1.0 - 0.5 * t));
+            notes.push_back(t > 0.0 ? "a longer tail" : "a shorter tail");
+            break;
+        }
+        case ReverbWord::Wider:
+            b.nudge(param::ReverbWidth, 0.3 * s);
+            notes.push_back(s > 0.0 ? "wider" : "narrower");
+            break;
+        case ReverbWord::Mono:
+            if (h.phrase == "mono")
+                b.set(param::ReverbWidth, 0.0);
+            else
+                b.nudge(param::ReverbWidth, -0.3 * s);
+            notes.push_back("narrower");
+            break;
+        case ReverbWord::Shimmer:
+            if (s < 0.0) {
+                b.nudge(param::ReverbHighCutHz, -0.15 * amount);
+                notes.push_back("darker");
+                break;
+            }
+            // There's no pitch-shifted (shimmer) reverb: the nearest is a bright plate.
+            if (!mode)
+                b.set(param::ReverbMode, static_cast<double>(dsp::ReverbMode::Plate));
+            b.nudge(param::ReverbHighCutHz, 0.15 * amount);
+            b.nudge(param::ReverbDamping, -0.15 * amount);
+            notes.push_back("there's no shimmer (pitch-shifted) reverb, so this is a bright plate, the nearest thing");
+            break;
+        default:
+            break; // modes, done above
+        }
+    }
+    if (b.edits.size() == first || notes.empty())
+        return false;
+
+    // Shaping a reverb that's off brings it in.
+    const bool switched = std::any_of(b.edits.begin() + static_cast<std::ptrdiff_t>(first), b.edits.end(),
+                                      [](const Edit& e) { return e.param == param::ReverbOn; });
+    if (!switched && b.value(param::ReverbOn) < 0.5f) {
+        b.set(param::ReverbOn, 1.0);
+        atLeast(param::ReverbMix, 0.25);
+    }
+    std::string text;
+    for (const auto& n : notes)
+        text += (text.empty() ? "" : ", ") + n;
+    text[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(text[0])));
+    said = text + ".";
+    return true;
+}
+
+// Every word the reverb rules know, for knownWord().
+std::vector<std::string_view> reverbWordList()
+{
+    std::vector<std::string_view> out(kReverbNouns);
+    for (const auto& [word, names] : kReverbWords)
+        out.insert(out.end(), names.begin(), names.end());
+    return out;
+}
+
+// A clause of nothing but reverb words, right after one about the reverb,
+// is about the reverb too: "make the reverb darker and lusher".
+bool continuesReverb(const std::string& clause)
+{
+    static const std::set<std::string> allowed = [] {
+        std::set<std::string> s;
+        for (const auto& [word, names] : kReverbWords)
+            for (const auto name : names)
+                if (name.find(' ') == std::string_view::npos)
+                    s.insert(std::string(name));
+        for (const char* w : {"a", "bit", "little", "lot", "much", "more", "less", "even", "slightly", "very", "too", "way",
+                              "tad", "touch", "lots"})
+            s.insert(w);
+        return s;
+    }();
+    const auto list = words(clause);
+    return !list.empty() && std::all_of(list.begin(), list.end(), [](const std::string& w) { return allowed.count(w) > 0; });
+}
+
 // ---------------------------------------------------------------- one clause
 
 struct ClauseResult {
@@ -939,6 +1254,13 @@ ClauseResult handle(const std::string& clause, Builder& b)
     const Alias* alias = findAlias(clause);
     const Match word = findWord(clause);
     const auto number = alias ? findNumber(without(clause, alias->phrase)) : std::nullopt;
+
+    // Reverb words, before the switches ("reverb with no chorus" keeps the
+    // reverb on) and the general words ("darker reverb" isn't a darker synth).
+    if (applyReverbWords(clause, b, result.said)) {
+        result.understood = true;
+        return result;
+    }
 
     // Switches.
     if (applySwitch(clause, b, result.said)) {
@@ -1044,9 +1366,9 @@ ClauseResult handle(const std::string& clause, Builder& b)
 
         // "more reverb", "lower the cutoff a bit", "longer release".
         if (dir != 0) {
-            // "More reverb" has its own, bigger steps.
-            if (dir > 0 && index == param::ReverbMix) {
-                moreReverb(b, intensity(rest));
+            // "More reverb" and "less reverb" have their own, bigger steps.
+            if (index == param::ReverbMix) {
+                result.said = moreReverb(b, dir * intensity(rest));
                 result.understood = true;
                 return result;
             }
@@ -1088,6 +1410,8 @@ bool knownWord(const std::string& word)
         for (int i = 0; i < kNumParams; ++i)
             for (const auto choice : spec(i).choices)
                 addWords(choice);
+        for (const auto phrase : reverbWordList())
+            addWords(phrase);
         for (const char* w : {
                  // filler
                  "make", "it", "its", "the", "a", "an", "and", "to", "of", "on", "in", "for", "with", "some", "please", "can",
@@ -1104,7 +1428,7 @@ bool knownWord(const std::string& word)
                  "off", "enable", "disable", "remove", "kill", "bypass", "without", "drop", "open", "close", "push", "crank",
                  "tame", "back", "dial", "pull", "speed", "slow", "extremely", "massively", "hugely", "significantly",
                  "super", "heavily", "loads", "tons", "seriously", "considerably", "subtle", "subtly", "somewhat", "gently",
-                 "tiny", "smidge", "ever", "small", "big",
+                 "tiny", "smidge", "ever", "small", "big", "free", "any",
                  // units
                  "hz", "khz", "k", "ms", "s", "sec", "secs", "second", "seconds", "db", "percent", "st", "semitone",
                  "semitones", "cent", "cents", "oct", "octave", "octaves", "x", "times", "voice", "voices"})
@@ -1137,7 +1461,8 @@ constexpr int kModelParams[] = {
     param::UnisonDetune,   param::UnisonSpread,    param::Lfo1Target,   param::Lfo1RateHz,      param::Lfo1Depth,
     param::EqOn,           param::EqLowGainDb,     param::EqHighGainDb, param::DelayOn,         param::DelayTimeMs,
     param::DelayFeedback,  param::DelayMix,        param::ReverbOn,     param::ReverbMix,       param::ReverbSize,
-    param::ReverbDecaySec, param::MatchEqAmount,
+    param::ReverbDecaySec, param::MatchEqAmount,   param::ReverbMode,   param::ReverbDamping,   param::ReverbHighCutHz,
+    param::ReverbModDepth, param::ReverbLowCutHz,
 };
 
 } // namespace
@@ -1149,8 +1474,11 @@ Reply interpret(std::string_view request, const ParamValues& current)
     bool allExact = true, anyUnderstood = false, anyMissed = false;
     std::string said;
 
+    bool aboutReverb = false; // the last clause named the reverb
     for (const auto& clause : clauses(normalise(request))) {
-        const ClauseResult result = handle(clause, builder);
+        const bool continues = aboutReverb && continuesReverb(clause);
+        aboutReverb = continues || hasAny(clause, kReverbNouns);
+        const ClauseResult result = handle(continues ? clause + " reverb" : clause, builder);
         if (!result.understood) {
             anyMissed = true;
             continue;
@@ -1189,6 +1517,7 @@ std::string helpText()
     return "Say what you want to hear, or name a setting:\n"
            "  make it brighter / darker / warmer / wider / punchier / softer\n"
            "  add more reverb    less delay    a bit more resonance\n"
+           "  plate / hall / room / vintage reverb    darker reverb    lush reverb\n"
            "  make it plucky     turn it into a pad    add vibrato    add a sub\n"
            "  set the cutoff to 2 kHz    attack 20 ms    reverb mix 40%\n"
            "  osc 2 square       unison 5 voices       high pass filter\n"
@@ -1249,7 +1578,7 @@ std::string describePreset(const Preset& preset)
         effect("delay " + (p[param::DelaySync] > 0.0f ? show(param::DelaySync) : show(param::DelayTimeMs)) + ", mix " +
                show(param::DelayMix));
     if (p[param::ReverbOn] >= 0.5f)
-        effect("reverb " + show(param::ReverbDecaySec) + ", mix " + show(param::ReverbMix));
+        effect("reverb " + show(param::ReverbMode) + " " + show(param::ReverbDecaySec) + ", mix " + show(param::ReverbMix));
     bool matchEq = false;
     for (const float g : preset.matchEq)
         matchEq = matchEq || g != 0.0f;
@@ -1282,6 +1611,7 @@ std::string modelSystemPrompt()
            "harsh, aggressive, edgy: filter_resonance up. Less harsh, smoother: filter_resonance down and filter_cutoff_hz down a little.\n"
            "squelchy, acid, resonant: filter_resonance set 0.75, filter_env_amount set 4, filter_decay_ms set 220, filter_sustain set 0.1.\n"
            "wider, fatter, thicker, lush, supersaw: unison_voices set 5, unison_detune up. Thinner, narrower: unison_voices set 1.\n"
+           "unison_detune: 8 to 15 cents is subtle, 20 to 30 a supersaw.\n"
            "punchy, snappy, tight: amp_attack_ms set 1, filter_env_amount set 2, filter_decay_ms set 160.\n"
            "soft, swelling, fades in: amp_attack_ms up.\n"
            "pad: amp_attack_ms set 350, amp_release_ms set 1800, amp_sustain set 0.85.\n"
@@ -1290,8 +1620,13 @@ std::string modelSystemPrompt()
            "vibrato: lfo1_target set pitch, lfo1_rate_hz set 5.5, lfo1_depth set 0.12.\n"
            "wobble, movement: lfo1_target set cutoff, lfo1_rate_hz set 2, lfo1_depth set 0.4. Tremolo: lfo1_target set amp.\n"
            "sub, more bass weight: osc3_wave set sine, osc3_coarse set -12, osc3_level set 0.7.\n"
-           "reverb, space, wet, dreamy, distant: reverb_on set on, reverb_mix up by a big step (0.25: people want to hear "
-           "it), and reverb_decay_s up so the tail is longer. Big hall: also reverb_size up, reverb_decay_s up more.\n"
+           "reverb, space, wet, dreamy, distant: reverb_on set on, reverb_mix up by a clear step (0.15: people want to "
+           "hear it), and reverb_decay_s up so the tail is longer. Big hall: also reverb_size up, reverb_decay_s up more.\n"
+           "plate, hall, room, chamber, vintage: reverb_mode set that name (and reverb_on set on).\n"
+           "darker reverb: reverb_highcut_hz down 0.15 and reverb_damping up 0.15. Never filter_cutoff_hz.\n"
+           "lush, chorused, swirly reverb: reverb_mod_depth up 0.2.\n"
+           "less muddy reverb: reverb_lowcut_hz set 200.\n"
+           "shimmer: not available. Don't touch the EQ for it.\n"
            "dry, closer: reverb_mix down, delay_mix down.\n"
            "echo, delay: delay_on set on, delay_mix up.\n"
            "breathy, noisy, airy: noise_level up. Cleaner: noise_level down.\n"
@@ -1304,8 +1639,12 @@ std::string modelSystemPrompt()
            "Request: make it brighter\n"
            "{\"edits\":[{\"param\":\"filter_cutoff_hz\",\"op\":\"nudge\",\"value\":0.15}],\"reply\":\"Opened the filter.\"}\n"
            "Request: add more reverb\n"
-           "{\"edits\":[{\"param\":\"reverb_on\",\"op\":\"set\",\"value\":\"on\"},{\"param\":\"reverb_mix\",\"op\":\"nudge\",\"value\":0.25},"
+           "{\"edits\":[{\"param\":\"reverb_on\",\"op\":\"set\",\"value\":\"on\"},{\"param\":\"reverb_mix\",\"op\":\"nudge\",\"value\":0.15},"
            "{\"param\":\"reverb_decay_s\",\"op\":\"nudge\",\"value\":0.08}],\"reply\":\"More reverb, with a longer tail.\"}\n"
+           "Request: darker plate reverb\n"
+           "{\"edits\":[{\"param\":\"reverb_on\",\"op\":\"set\",\"value\":\"on\"},{\"param\":\"reverb_mode\",\"op\":\"set\",\"value\":\"plate\"},"
+           "{\"param\":\"reverb_highcut_hz\",\"op\":\"nudge\",\"value\":-0.15},{\"param\":\"reverb_damping\",\"op\":\"nudge\",\"value\":0.15}],"
+           "\"reply\":\"A darker plate.\"}\n"
            "Request: darker and a lot wider\n"
            "{\"edits\":[{\"param\":\"filter_cutoff_hz\",\"op\":\"nudge\",\"value\":-0.12},{\"param\":\"unison_voices\",\"op\":\"set\",\"value\":7},"
            "{\"param\":\"unison_detune\",\"op\":\"nudge\",\"value\":0.2}],\"reply\":\"Darker, with a wide unison stack.\"}\n"

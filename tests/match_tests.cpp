@@ -160,6 +160,7 @@ void testDecimate()
 void testPitchAndNotes()
 {
     auto p = defaultValues();
+    p[param::ReverbOn] = 0.0f;
     p[param::AmpReleaseMs] = 80.0f;
 
     // Single notes across the keyboard, with each waveform.
@@ -239,6 +240,7 @@ void testMatchEqFit()
 
     // End to end: noise through a known EQ, compared with the same noise without it.
     auto p = defaultValues();
+    p[param::ReverbOn] = 0.0f;
     p[param::Osc1Level] = 0.0f;
     p[param::NoiseLevel] = 1.0f;
     Preset coloured;
@@ -372,6 +374,19 @@ void testSearchSpace()
     CHECK(params[param::EqOn] == 0.0f);
     CHECK(params[param::Osc1Coarse] == 0.0f);
 
+    // The search starts dry, although the default patch has a touch of reverb,
+    // and can choose the reverb's mode.
+    CHECK(space.base[param::ReverbOn] == 0.0f);
+    CHECK(defaultValues()[param::ReverbOn] == 1.0f);
+    std::size_t modes = 0;
+    for (const auto& dim : space.dims)
+        if (dim.param == param::ReverbMode) {
+            CHECK(dim.extended);
+            CHECK(dim.choices.size() == 5);
+            ++modes;
+        }
+    CHECK(modes == 1);
+
     // What can be heard: a silent oscillator's settings and a switched-off effect's can't.
     auto p = space.base;
     p[param::Osc2Level] = 0.0f;
@@ -381,7 +396,7 @@ void testSearchSpace()
     for (std::size_t i = 0; i < space.dims.size(); ++i) {
         const int index = space.dims[i].param;
         if (index == param::Osc2Wave || index == param::Osc2Coarse || index == param::ReverbDecaySec ||
-            index == param::Osc1PulseWidth)
+            index == param::ReverbMode || index == param::Osc1PulseWidth)
             CHECK(!audible[i]);
         if (index == param::Osc2Level || index == param::Osc1Wave || index == param::DelayTimeMs ||
             index == param::FilterCutoffHz || index == param::ReverbOn)
@@ -395,6 +410,7 @@ void testMatchRecoversSound()
 {
     // A square-wave bass with a filter sweep. The matcher only hears the audio.
     auto p = defaultValues();
+    p[param::ReverbOn] = 0.0f;
     p[param::GainDb] = -6.0f;
     p[param::Osc1Wave] = static_cast<float>(dsp::Wave::Square);
     p[param::FilterCutoffHz] = 900.0f;
@@ -470,6 +486,7 @@ void testMatchEqHelps()
     // The same patch recorded through an EQ the synth doesn't have: the search
     // can't reproduce the colouring, the EQ match can.
     Preset coloured;
+    coloured.params[param::ReverbOn] = 0.0f;
     coloured.params[param::FilterCutoffHz] = 4000.0f;
     for (int band = 0; band < kMatchEqBands; ++band) {
         const double octaves = std::log2(dsp::matchEqBandHz(band) / 1000.0);
@@ -536,13 +553,17 @@ void testEncoderFeatures()
     CHECK(a == featuresOf(1)); // deterministic
     CHECK(a != b);
 
-    // Random sounds stay inside every parameter's range, and differ.
+    // Random sounds stay inside every parameter's range, and differ. Their
+    // reverbs come in every mode.
+    std::set<float> reverbModes;
     for (std::uint32_t seed = 0; seed < 50; ++seed) {
         const auto sound = randomSound(space, seed);
         for (int i = 0; i < kNumParams; ++i)
             CHECK(sound.params[static_cast<std::size_t>(i)] == clampToRange(spec(i), sound.params[static_cast<std::size_t>(i)]));
         CHECK(sound.note.note >= 28 && sound.note.note <= 88);
+        reverbModes.insert(sound.params[param::ReverbMode]);
     }
+    CHECK(reverbModes.size() == 5);
     CHECK(randomSound(space, 3).params != randomSound(space, 4).params);
 
     // Silence in gives all zeros rather than garbage.

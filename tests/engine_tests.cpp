@@ -21,6 +21,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <numbers>
 #include <set>
 #include <string>
@@ -121,10 +122,18 @@ std::vector<double> runOsc(Wave wave, double dt, std::size_t n, double pulseWidt
     return x;
 }
 
+// The default patch without its touch of reverb.
+ParamValues dryDefaults()
+{
+    auto p = defaultValues();
+    p[param::ReverbOn] = 0.0f;
+    return p;
+}
+
 // A patch with only oscillator 1, as a clean starting point for tests.
 ParamValues sinePatch()
 {
-    auto p = defaultValues();
+    auto p = dryDefaults();
     p[param::GainDb] = 0.0f;
     p[param::AmpAttackMs] = 1.0f;
     p[param::Osc1Wave] = static_cast<float>(Wave::Sine);
@@ -144,7 +153,7 @@ StereoBuffer renderNote(const ParamValues& params, int note, double length, doub
 // A bright, steady patch for filter tests: one saw at full level.
 ParamValues sawPatch()
 {
-    auto p = defaultValues();
+    auto p = dryDefaults();
     p[param::GainDb] = 0.0f;
     p[param::AmpAttackMs] = 1.0f;
     return p;
@@ -248,7 +257,17 @@ void testSchema()
     CHECK(findParam("filter_release_ms") == param::FilterReleaseMs);
     CHECK(findParam("matcheq_amount") == param::MatchEqAmount);
     CHECK(findParam("lfo2_depth") == param::lfo(1, param::LfoDepth));
-    CHECK(kNumParams == 72);
+    CHECK(kNumParams == 79);
+
+    // A touch of hall reverb by default; the mode is a named choice.
+    const auto defaults = defaultValues();
+    CHECK(defaults[param::ReverbOn] == 1.0f);
+    CHECK(defaults[param::ReverbMix] == 0.15f);
+    CHECK(choiceName(spec(param::ReverbMode), defaults[param::ReverbMode]) == "hall");
+    CHECK(parseChoice(spec(param::ReverbMode), "vintage") == 4.0f);
+    CHECK(findParam("reverb_highcut_hz") == param::ReverbHighCutHz);
+    CHECK(nodeOf(param::ReverbMode) == "reverb");
+    CHECK(spec(param::UnisonDetune).max == 50.0f);
 
     // Every parameter belongs to a node, and node + field leads back to it.
     CHECK(nodeOf(param::FilterCutoffHz) == "filter");
@@ -1001,16 +1020,19 @@ void testUnison()
     const auto narrow = renderNote(p, 57, 1.0, 0.0, sr);
     CHECK(narrow.left == narrow.right);
 
-    // Two sine copies, 100 cents either side of the note.
+    // Two sine copies, 50 cents (the most detune) either side of the note.
     auto s = sinePatch();
     s[param::UnisonVoices] = 2.0f;
-    s[param::UnisonDetune] = 100.0f;
+    s[param::UnisonDetune] = 50.0f;
     s[param::UnisonSpread] = 0.0f;
     const auto pair = renderNote(s, 69, 1.5, 0.0, sr);
     const auto steady = slice(pair.left, 0.25, 1.25, sr);
-    CHECK_NEAR(amplitudeAt(steady, 440.0 * std::pow(2.0, -100.0 / 1200.0) / sr), std::sqrt(0.5), 0.02);
-    CHECK_NEAR(amplitudeAt(steady, 440.0 * std::pow(2.0, 100.0 / 1200.0) / sr), std::sqrt(0.5), 0.02);
+    CHECK_NEAR(amplitudeAt(steady, 440.0 * std::pow(2.0, -50.0 / 1200.0) / sr), std::sqrt(0.5), 0.02);
+    CHECK_NEAR(amplitudeAt(steady, 440.0 * std::pow(2.0, 50.0 / 1200.0) / sr), std::sqrt(0.5), 0.02);
     CHECK(amplitudeAt(steady, 440.0 / sr) < 0.02);
+    // More than the most is held at the most.
+    s[param::UnisonDetune] = 100.0f;
+    CHECK(renderNote(s, 69, 1.5, 0.0, sr).left == pair.left);
 }
 
 void testLfo()
@@ -1244,13 +1266,50 @@ void testDelay()
     CHECK(echo(wobbly.left, 0.1) > 0.5f * blip);
 }
 
+// The signal through a band-pass around hz (a two-pole resonator with a peak
+// gain of 1, from the Audio EQ Cookbook, Q = 2).
+std::vector<float> bandPass(const std::vector<float>& x, double sampleRate, double hz)
+{
+    const double w0 = 2.0 * kPi * hz / sampleRate, alpha = std::sin(w0) / 4.0, a0 = 1.0 + alpha;
+    const double b0 = alpha / a0, b2 = -alpha / a0, a1 = -2.0 * std::cos(w0) / a0, a2 = (1.0 - alpha) / a0;
+    std::vector<float> y(x.size());
+    double x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0;
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        const double out = b0 * x[i] + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1;
+        x1 = x[i];
+        y2 = y1;
+        y1 = out;
+        y[i] = static_cast<float>(out);
+    }
+    return y;
+}
+
+// The largest bend in a stretch of signal (second difference): a click shows up as a spike.
+double maxBend(const std::vector<float>& x, std::size_t from, std::size_t to)
+{
+    double worst = 0.0;
+    for (std::size_t i = std::max<std::size_t>(from, 2); i < std::min(to, x.size()); ++i)
+        worst = std::max(worst, std::abs(static_cast<double>(x[i]) - 2.0 * x[i - 1] + x[i - 2]));
+    return worst;
+}
+
+// The largest step from one sample to the next.
+double maxStep(const std::vector<float>& x, std::size_t from, std::size_t to)
+{
+    double worst = 0.0;
+    for (std::size_t i = std::max<std::size_t>(from, 1); i < std::min(to, x.size()); ++i)
+        worst = std::max(worst, std::abs(static_cast<double>(x[i]) - x[i - 1]));
+    return worst;
+}
+
 void testReverb()
 {
     const double sr = 48000.0;
-    const auto run = [&](const ParamValues& p) {
+    const auto run = [&](const ParamValues& p, double sampleRate = 48000.0) {
         const NoteEvent events[] = {{0.0, 0.03, 60, 1.0f}};
         RenderSettings settings;
-        settings.sampleRate = sr;
+        settings.sampleRate = sampleRate;
         settings.tailSec = 1.2;
         return render(p, events, settings);
     };
@@ -1268,10 +1327,12 @@ void testReverb()
     p[param::ReverbDamping] = 0.0f;
     p[param::ReverbPredelayMs] = 0.0f;
 
-    // The tail falls 60 dB in the decay time: 36 dB over 0.6 s for a 1 s decay.
-    const auto dropDb = [&](const StereoBuffer& a) {
-        const double early = rms(a.left, at(0.2, sr), at(0.3, sr));
-        const double late = rms(a.left, at(0.8, sr), at(0.9, sr));
+    // The tail falls 60 dB in the decay time: 36 dB over 0.6 s for a 1 s
+    // decay. Measured on the whole signal, or around one frequency.
+    const auto dropDb = [&](const StereoBuffer& a, double hz = 0.0) {
+        const auto x = hz > 0.0 ? bandPass(a.left, a.sampleRate, hz) : a.left;
+        const double early = rms(x, at(0.2, a.sampleRate), at(0.3, a.sampleRate));
+        const double late = rms(x, at(0.8, a.sampleRate), at(0.9, a.sampleRate));
         return 20.0 * std::log10(early / late);
     };
     p[param::ReverbDecaySec] = 1.0f;
@@ -1280,6 +1341,20 @@ void testReverb()
     p[param::ReverbDecaySec] = 3.0f;
     const auto longTail = run(p);
     CHECK_NEAR(dropDb(longTail), 12.0, 3.0);
+
+    // Every mode keeps to the decay time in the mids.
+    for (int mode = 0; mode < static_cast<int>(dsp::ReverbMode::Count); ++mode) {
+        auto m = p;
+        m[param::ReverbMode] = static_cast<float>(mode);
+        m[param::ReverbDecaySec] = 1.0f;
+        const double shortDrop = dropDb(run(m), 1000.0);
+        m[param::ReverbDecaySec] = 3.0f;
+        const double longDrop = dropDb(run(m), 1000.0);
+        std::printf("reverb %s: 1 kHz drop over 0.6 s %.1f dB (1 s decay), %.1f dB (3 s)\n",
+                    std::string(choiceName(spec(param::ReverbMode), static_cast<float>(mode))).c_str(), shortDrop, longDrop);
+        CHECK_NEAR(shortDrop, 36.0, 4.0);
+        CHECK_NEAR(longDrop, 12.0, 3.0);
+    }
 
     // The room size doesn't change the decay time.
     p[param::ReverbSize] = 1.0f;
@@ -1290,14 +1365,59 @@ void testReverb()
     p[param::ReverbDamping] = 0.9f;
     const auto damped = run(p);
     CHECK(rms(damped.left, at(0.8, sr), at(0.9, sr)) < 0.5 * rms(longTail.left, at(0.8, sr), at(0.9, sr)));
+
+    // ... by the same amount at any size and sample rate: the treble decay is
+    // set in seconds, not per trip round a line.
+    p[param::ReverbDamping] = 0.4f;
+    p[param::ReverbSize] = 0.0f;
+    const double smallTreble = dropDb(run(p), 4000.0);
+    p[param::ReverbSize] = 1.0f;
+    const double bigTreble = dropDb(run(p), 4000.0);
+    p[param::ReverbSize] = 0.5f;
+    std::printf("reverb: 4 kHz drop at size 0 %.1f dB, at size 1 %.1f dB\n", smallTreble, bigTreble);
+    CHECK(smallTreble > 16.0); // damped: more than the 12 dB of the mids
+    CHECK_NEAR(smallTreble, bigTreble, 2.0);
+    const double treble48 = dropDb(run(p), 2000.0);
+    const double treble24 = dropDb(run(p, 24000.0), 2000.0);
+    std::printf("reverb: 2 kHz drop at 48 kHz %.1f dB, at 24 kHz %.1f dB\n", treble48, treble24);
+    CHECK_NEAR(treble48, treble24, 2.0);
     p[param::ReverbDamping] = 0.0f;
 
-    // Stereo by default, mono at a width of 0.
+    // Bass decay: x2 makes the lows ring on.
+    p[param::ReverbDecaySec] = 1.0f;
+    const double bass = dropDb(run(p), 100.0);
+    p[param::ReverbBassMult] = 2.0f;
+    const double longBass = dropDb(run(p), 100.0);
+    std::printf("reverb: 100 Hz drop %.1f dB, with bass decay x2 %.1f dB\n", bass, longBass);
+    CHECK(longBass < 0.7 * bass);
+    p[param::ReverbBassMult] = 1.0f;
+    p[param::ReverbDecaySec] = 3.0f;
+
+    // The high cut darkens what goes in.
+    const auto bright = rms(bandPass(longTail.left, sr, 8000.0), at(0.1, sr), at(0.5, sr));
+    p[param::ReverbHighCutHz] = 3000.0f;
+    const auto cut = rms(bandPass(run(p).left, sr, 8000.0), at(0.1, sr), at(0.5, sr));
+    CHECK(cut < 0.4 * bright);
+    p[param::ReverbHighCutHz] = 20000.0f;
+
+    // Stereo by default, mono at a width of 0. Width doesn't change the mono sum.
     CHECK(longTail.left != longTail.right);
     p[param::ReverbWidth] = 0.0f;
     const auto narrow = run(p);
     CHECK(narrow.left == narrow.right);
+    double sumDiff = 0.0;
+    for (std::size_t i = 0; i < narrow.numFrames(); ++i)
+        sumDiff = std::max(sumDiff, std::abs(static_cast<double>(narrow.left[i]) + narrow.right[i] - longTail.left[i] -
+                                             longTail.right[i]));
+    CHECK(sumDiff < 1.0e-5);
     p[param::ReverbWidth] = 1.0f;
+
+    // The wobble is seeded: the same tail every time, but not the tail without it.
+    p[param::ReverbModDepth] = 1.0f;
+    const auto wobbly = run(p);
+    CHECK(run(p).left == wobbly.left);
+    CHECK(wobbly.left != longTail.left);
+    p[param::ReverbModDepth] = spec(param::ReverbModDepth).defaultValue;
 
     // Pre-delay holds the reverb back.
     p[param::ReverbPredelayMs] = 100.0f;
@@ -1319,6 +1439,170 @@ void testReverb()
     const double wetDb = 20.0 * std::log10(rms(wetSaw.left, at(1.5, sr), at(2.0, sr)) / rms(drySaw.left, at(1.5, sr), at(2.0, sr)));
     std::printf("reverb: fully wet level for a held note at the default settings: %.1f dB relative to dry\n", wetDb);
     CHECK_NEAR(wetDb, -3.0, 4.0);
+
+    // Every mode is about as loud as the others, on a held chord of saws and
+    // on filtered noise. (One note alone can land on a peak or a dip of a mode.)
+    const auto modeDb = [&](int mode) {
+        double sum = 0.0;
+        for (const bool noise : {false, true}) {
+            auto q = level;
+            q[param::ReverbMode] = static_cast<float>(mode);
+            if (noise) {
+                q[param::Osc1Level] = 0.0f;
+                q[param::NoiseLevel] = 0.5f;
+                q[param::FilterCutoffHz] = 1500.0f;
+            }
+            const NoteEvent chord[] = {{0.0, 2.0, 45, 1.0f}, {0.0, 2.0, 52, 1.0f}, {0.0, 2.0, 57, 1.0f}, {0.0, 2.0, 64, 1.0f}};
+            RenderSettings settings;
+            settings.tailSec = 0.0;
+            const auto wet = render(q, chord, settings);
+            const double l = rms(wet.left, at(1.2, sr), at(2.0, sr)), r = rms(wet.right, at(1.2, sr), at(2.0, sr));
+            sum += 10.0 * std::log10(l * l + r * r);
+        }
+        return sum / 2.0;
+    };
+    const double hallDb = modeDb(static_cast<int>(dsp::ReverbMode::Hall));
+    for (int mode = 0; mode < static_cast<int>(dsp::ReverbMode::Count); ++mode) {
+        const double db = modeDb(mode) - hallDb;
+        std::printf("reverb %s: %+.1f dB against hall\n",
+                    std::string(choiceName(spec(param::ReverbMode), static_cast<float>(mode))).c_str(), db);
+        CHECK_NEAR(db, 0.0, 2.0);
+    }
+}
+
+// Plays a patch through an engine in 256-sample blocks, calling
+// change(engine, seconds) before each block. One note, from 0 to noteSec.
+StereoBuffer play(const ParamValues& p, int note, double noteSec, double totalSec,
+                  const std::function<void(Engine&, double)>& change = {})
+{
+    const double sr = 48000.0;
+    Engine engine;
+    engine.prepare(sr);
+    engine.setParams(p);
+    StereoBuffer out;
+    out.sampleRate = sr;
+    const std::size_t total = at(totalSec, sr), block = 256;
+    out.left.resize(total);
+    out.right.resize(total);
+    engine.noteOn(note, 1.0f);
+    bool held = true;
+    for (std::size_t start = 0; start < total; start += block) {
+        const double now = static_cast<double>(start) / sr;
+        if (held && now >= noteSec) {
+            engine.noteOff(note);
+            held = false;
+        }
+        if (change)
+            change(engine, now);
+        const auto n = static_cast<int>(std::min(block, total - start));
+        engine.process(out.left.data() + start, out.right.data() + start, n);
+    }
+    return out;
+}
+
+void testReverbGlides()
+{
+    const double sr = 48000.0;
+    // A sine through a fully wet reverb: a tonal tail, where clicks are easy to hear.
+    auto p = sinePatch();
+    p[param::AmpReleaseMs] = 5.0f;
+    p[param::ReverbOn] = 1.0f;
+    p[param::ReverbMix] = 1.0f;
+    p[param::ReverbDecaySec] = 3.0f;
+    p[param::ReverbDamping] = 0.6f;
+    const auto steady = play(p, 57, 0.4, 1.2);
+    const double tailFrom = 0.5, tailTo = 1.2;
+    const double calm = maxBend(steady.left, at(tailFrom, sr), at(tailTo, sr));
+    CHECK(calm > 0.0);
+
+    // Dragging the size while the tail rings, a step every block, bends the
+    // pitch a little but doesn't click.
+    const auto drag = play(p, 57, 0.4, 1.2, [](Engine& e, double now) {
+        if (now >= 0.5 && now < 0.8)
+            e.setParam(param::ReverbSize, 0.5f + 0.27f * static_cast<float>(now - 0.5));
+    });
+    const double dragged = maxBend(drag.left, at(tailFrom, sr), at(tailTo, sr));
+    // One big jump, as when a preset is loaded.
+    const auto jump = play(p, 57, 0.4, 1.2, [](Engine& e, double now) {
+        if (now >= 0.6)
+            e.setParam(param::ReverbSize, 0.9f);
+    });
+    const double jumped = maxBend(jump.left, at(tailFrom, sr), at(tailTo, sr));
+    std::printf("reverb: tail bend %.5f, dragging the size %.5f, a size jump %.5f\n", calm, dragged, jumped);
+    CHECK(dragged < 3.0 * calm);
+    CHECK(jumped < 3.0 * calm);
+
+    // Pre-delay changes while the note plays glide too.
+    const double heldCalm = maxBend(steady.left, at(0.1, sr), at(0.4, sr));
+    const auto predelay = play(p, 57, 0.4, 1.2, [](Engine& e, double now) {
+        if (now >= 0.1 && now < 0.4)
+            e.setParam(param::ReverbPredelayMs, 10.0f + 100.0f * static_cast<float>(now - 0.1));
+    });
+    CHECK(maxBend(predelay.left, at(0.1, sr), at(0.4, sr)) < 3.0 * heldCalm);
+
+    // A new mode fades the old tail out over a few ms instead of cutting it.
+    const auto mode = play(p, 57, 0.4, 1.2, [](Engine& e, double now) {
+        if (now >= 0.6)
+            e.setParam(param::ReverbMode, static_cast<float>(dsp::ReverbMode::Plate));
+    });
+    const double calmStep = maxStep(steady.left, at(tailFrom, sr), at(tailTo, sr));
+    CHECK(maxStep(mode.left, at(tailFrom, sr), at(tailTo, sr)) < 1.5 * calmStep);
+    // ... and the new mode is empty: with no input, it stays silent.
+    CHECK(peak(mode.left, at(0.7, sr), at(1.2, sr)) == 0.0f);
+}
+
+void testEffectSwitching()
+{
+    const double sr = 48000.0;
+    auto p = sinePatch();
+    p[param::AmpReleaseMs] = 5.0f;
+    p[param::ReverbOn] = 1.0f;
+    p[param::ReverbMix] = 0.5f;
+    p[param::ReverbDecaySec] = 2.0f;
+    p[param::DelayTimeMs] = 120.0f;
+    p[param::DelayFeedback] = 0.6f;
+    p[param::DelayMix] = 0.5f;
+    const auto steady = play(p, 57, 0.3, 1.0);
+    const double calmStep = maxStep(steady.left, at(0.35, sr), at(1.0, sr));
+
+    // Switching the reverb off while its tail rings fades it out (no click),
+    // then leaves the output silent.
+    const auto off = play(p, 57, 0.3, 1.0, [](Engine& e, double now) {
+        if (now >= 0.5)
+            e.setParam(param::ReverbOn, 0.0f);
+    });
+    CHECK(maxStep(off.left, at(0.35, sr), at(1.0, sr)) < 1.5 * calmStep);
+    CHECK(peak(off.left, at(0.52, sr), at(1.0, sr)) == 0.0f);
+    CHECK(peak(off.left, at(0.49, sr), at(0.5, sr)) > 0.01f);
+
+    // Switched back on, it starts empty: the old tail doesn't come back.
+    const auto again = play(p, 57, 0.3, 1.0, [](Engine& e, double now) {
+        e.setParam(param::ReverbOn, now >= 0.5 && now < 0.6 ? 0.0f : 1.0f);
+    });
+    CHECK(peak(again.left, at(0.6, sr), at(1.0, sr)) == 0.0f);
+
+    // Switching it on mid-note fades it in.
+    auto later = p;
+    later[param::ReverbOn] = 0.0f;
+    const auto on = play(later, 57, 0.6, 1.0, [](Engine& e, double now) {
+        if (now >= 0.3)
+            e.setParam(param::ReverbOn, 1.0f);
+    });
+    CHECK(maxStep(on.left, at(0.29, sr), at(0.33, sr)) < 1.5 * maxStep(on.left, at(0.2, sr), at(0.29, sr)));
+    CHECK(peak(on.left, at(0.5, sr), at(0.6, sr)) > 1.2f * peak(on.left, at(0.2, sr), at(0.29, sr))); // the reverb is in
+
+    // The delay: off in the middle of an echo fades out; back on, no stale
+    // echoes from before (its lines aren't cleared, only marked as old).
+    p[param::ReverbOn] = 0.0f;
+    p[param::DelayOn] = 1.0f;
+    const auto echoes = play(p, 57, 0.05, 1.0);
+    const auto delayOff = play(p, 57, 0.05, 1.0, [](Engine& e, double now) {
+        e.setParam(param::DelayOn, now >= 0.25 && now < 0.35 ? 0.0f : 1.0f);
+    });
+    CHECK(peak(echoes.left, at(0.36, sr), at(1.0, sr)) > 0.05f);
+    CHECK(peak(echoes.left, at(0.25, sr), at(0.26, sr)) > 0.05f); // mid-echo
+    CHECK(maxStep(delayOff.left, at(0.2, sr), at(0.35, sr)) < 1.5 * maxStep(echoes.left, at(0.2, sr), at(0.35, sr)));
+    CHECK(peak(delayOff.left, at(0.27, sr), at(1.0, sr)) == 0.0f);
 }
 
 void testMatchEq()
@@ -1365,7 +1649,7 @@ void testEverythingAtOnce()
         p[param::Osc3Wave] = static_cast<float>(Wave::Square);
         p[param::NoiseLevel] = 0.5f;
         p[param::UnisonVoices] = 7.0f;
-        p[param::UnisonDetune] = 100.0f;
+        p[param::UnisonDetune] = 50.0f;
         p[param::UnisonSpread] = 1.0f;
         p[param::FilterResonance] = 1.0f;
         p[param::FilterCutoffHz] = 2000.0f;
@@ -1390,20 +1674,29 @@ void testEverythingAtOnce()
         p[param::ReverbSize] = 1.0f;
         p[param::ReverbDecaySec] = 20.0f;
         p[param::ReverbMix] = 1.0f;
+        p[param::ReverbModDepth] = 1.0f;
+        p[param::ReverbModRateHz] = 5.0f;
+        p[param::ReverbDiffusion] = 1.0f;
+        p[param::ReverbBassMult] = 2.0f;
+        p[param::ReverbPredelayMs] = 200.0f;
 
-        Preset preset;
-        preset.params = p;
-        preset.matchEq.fill(18.0f);
+        // Every reverb mode.
+        for (int mode = 0; mode < static_cast<int>(dsp::ReverbMode::Count); ++mode) {
+            p[param::ReverbMode] = static_cast<float>(mode);
+            Preset preset;
+            preset.params = p;
+            preset.matchEq.fill(18.0f);
 
-        const NoteEvent events[] = {{0.0, 0.3, 24, 1.0f}, {0.05, 0.3, 127, 1.0f}, {0.1, 0.2, 60, 1.0f}};
-        RenderSettings settings;
-        settings.sampleRate = sr;
-        settings.tailSec = 0.3;
-        const auto audio = render(preset, events, settings);
-        bool finite = true;
-        for (std::size_t i = 0; i < audio.numFrames(); ++i)
-            finite = finite && std::isfinite(audio.left[i]) && std::isfinite(audio.right[i]);
-        CHECK(finite);
+            const NoteEvent events[] = {{0.0, 0.3, 24, 1.0f}, {0.05, 0.3, 127, 1.0f}, {0.1, 0.2, 60, 1.0f}};
+            RenderSettings settings;
+            settings.sampleRate = sr;
+            settings.tailSec = 0.3;
+            const auto audio = render(preset, events, settings);
+            bool finite = true;
+            for (std::size_t i = 0; i < audio.numFrames(); ++i)
+                finite = finite && std::isfinite(audio.left[i]) && std::isfinite(audio.right[i]);
+            CHECK(finite);
+        }
     }
 }
 
@@ -1535,12 +1828,14 @@ struct GoldenCase {
 std::vector<GoldenCase> goldenCases()
 {
     std::vector<GoldenCase> cases;
+    // All but the effects chain are dry: they were recorded before the
+    // default patch had its touch of reverb.
 
     // The default patch: one saw.
-    cases.push_back({"default_saw_c3", defaultValues(), {{0.0, 0.25, 48, 0.8f}}});
+    cases.push_back({"default_saw_c3", dryDefaults(), {{0.0, 0.25, 48, 0.8f}}});
 
     {
-        auto p = defaultValues();
+        auto p = dryDefaults();
         p[param::Osc1Wave] = static_cast<float>(Wave::Square);
         p[param::Osc1PulseWidth] = 0.3f;
         p[param::AmpAttackMs] = 20.0f;
@@ -1551,7 +1846,7 @@ std::vector<GoldenCase> goldenCases()
 
     {
         // Three detuned oscillators playing a chord with overlapping notes.
-        auto p = defaultValues();
+        auto p = dryDefaults();
         p[param::Osc2Level] = 0.6f;
         p[param::Osc2Wave] = static_cast<float>(Wave::Square);
         p[param::Osc2Coarse] = 12.0f;
@@ -1567,7 +1862,7 @@ std::vector<GoldenCase> goldenCases()
 
     {
         // Noise plus a sine, decaying to silence with the key held.
-        auto p = defaultValues();
+        auto p = dryDefaults();
         p[param::Osc1Wave] = static_cast<float>(Wave::Sine);
         p[param::Osc1Level] = 0.5f;
         p[param::NoiseLevel] = 0.8f;
@@ -1579,7 +1874,7 @@ std::vector<GoldenCase> goldenCases()
 
     {
         // A resonant low-pass swept down by the filter envelope.
-        auto p = defaultValues();
+        auto p = dryDefaults();
         p[param::FilterCutoffHz] = 200.0f;
         p[param::FilterResonance] = 0.65f;
         p[param::FilterEnvAmount] = 5.0f;
@@ -1592,7 +1887,7 @@ std::vector<GoldenCase> goldenCases()
 
     {
         // A key-tracked high-pass on a square and noise, with overlapping notes.
-        auto p = defaultValues();
+        auto p = dryDefaults();
         p[param::Osc1Wave] = static_cast<float>(Wave::Square);
         p[param::NoiseLevel] = 0.3f;
         p[param::FilterType] = static_cast<float>(FilterType::HighPass);
@@ -1605,7 +1900,7 @@ std::vector<GoldenCase> goldenCases()
 
     {
         // A narrow band-pass that the envelope moves downwards.
-        auto p = defaultValues();
+        auto p = dryDefaults();
         p[param::Osc2Level] = 0.7f;
         p[param::Osc2Coarse] = 7.0f;
         p[param::FilterType] = static_cast<float>(FilterType::BandPass);
@@ -1619,7 +1914,7 @@ std::vector<GoldenCase> goldenCases()
 
     {
         // A wide detuned stack with vibrato and a random filter wobble.
-        auto p = defaultValues();
+        auto p = dryDefaults();
         p[param::UnisonVoices] = 5.0f;
         p[param::UnisonDetune] = 22.0f;
         p[param::UnisonSpread] = 0.8f;
@@ -1798,6 +2093,8 @@ int main(int argc, char** argv)
     testEqNode();
     testDelay();
     testReverb();
+    testReverbGlides();
+    testEffectSwitching();
     testMatchEq();
     testEverythingAtOnce();
     testJson();

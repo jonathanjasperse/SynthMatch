@@ -166,6 +166,11 @@ private:
 
     // Effects.
     bool eqOn_ = false, delayOn_ = false, reverbOn_ = false;
+    // How far each effect is faded in: switching one on or off fades its
+    // output over a few ms instead of clicking.
+    double eqFade_ = 0.0, delayFade_ = 0.0, reverbFade_ = 0.0;
+    double effectFadeStep_ = 1.0;
+    std::array<std::array<float, 64>, 2> effectDry_{}; // the input to an effect while it fades
     dsp::ParametricEq eq_;
     dsp::StereoDelay delay_;
     dsp::Reverb reverb_;

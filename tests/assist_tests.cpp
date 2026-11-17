@@ -7,7 +7,9 @@
 #include "synthmatch/dsp/Filter.h"
 #include "synthmatch/dsp/Lfo.h"
 #include "synthmatch/dsp/Oscillator.h"
+#include "synthmatch/dsp/Reverb.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -49,6 +51,7 @@ ParamValues midPatch()
     p[param::FilterResonance] = 0.3f;
     p[param::ReverbOn] = 1.0f;
     p[param::ReverbMix] = 0.3f;
+    p[param::ReverbDecaySec] = 2.0f;
     p[param::AmpAttackMs] = 30.0f;
     p[param::AmpReleaseMs] = 400.0f;
     return p;
@@ -148,22 +151,101 @@ void testRulesVocabulary()
     dry[param::ReverbMix] = 0.1f;
     const auto wet = after("add more reverb", dry);
     CHECK(v(wet, param::ReverbOn) == 1.0f);
-    CHECK_NEAR(v(wet, param::ReverbMix), 0.3, 1e-6);
-    CHECK_NEAR(v(after("more reverb", p), param::ReverbMix), 0.55, 1e-6);
-    CHECK_NEAR(v(after("a lot more reverb", p), param::ReverbMix), 0.8, 1e-6);
-    CHECK(v(after("less reverb", p), param::ReverbMix) < 0.3f);
+    CHECK(v(wet, param::ReverbMix) >= 0.25f && v(wet, param::ReverbMix) <= 0.3f);
+    // Each "more" is 6 dB more reverb against the dry sound: from the default
+    // touch (15%) to 30%, then 58%. After that the dry sound would start to
+    // fade, so the mix stops at 70% and the tail grows longer and bigger.
+    const auto reverbDb = [](const ParamValues& q) {
+        const double mix = v(q, param::ReverbMix);
+        return 20.0 * std::log10(std::min(1.0, 2.0 * mix) / std::min(1.0, 2.0 * (1.0 - mix)));
+    };
+    const auto touch = defaultValues();
+    const auto more1 = after("more reverb", touch);
+    const auto more2 = after("more reverb", more1);
+    const auto more3 = after("more reverb", more2);
+    CHECK_NEAR(v(more1, param::ReverbMix), 0.30, 0.005);
+    CHECK_NEAR(v(more2, param::ReverbMix), 0.58, 0.005);
+    CHECK_NEAR(reverbDb(more1) - reverbDb(touch), 6.0, 0.1);
+    CHECK_NEAR(reverbDb(more2) - reverbDb(more1), 6.0, 0.1);
+    CHECK_NEAR(v(more3, param::ReverbMix), 0.7, 1e-6);
+    CHECK(v(more3, param::ReverbDecaySec) > v(more2, param::ReverbDecaySec));
+    CHECK(v(more3, param::ReverbSize) > v(more2, param::ReverbSize));
+    CHECK_NEAR(v(after("a lot more reverb", p), param::ReverbMix), 0.7, 1e-6);
+    // "Less" takes the same step back, and "drier" too.
+    CHECK_NEAR(v(after("less reverb", p), param::ReverbMix), 0.15, 0.005);
+    CHECK_NEAR(v(after("make it drier", p), param::ReverbMix), 0.15, 0.005);
+    CHECK(v(after("a bit less reverb", p), param::ReverbMix) > v(after("less reverb", p), param::ReverbMix));
     CHECK(v(after("turn off the reverb", p), param::ReverbOn) == 0.0f);
-    CHECK(v(after("make it drier", p), param::ReverbMix) < 0.3f);
-    CHECK(v(after("make it sound like a cathedral", p), param::ReverbDecaySec) > v(p, param::ReverbDecaySec));
+    // Less of a reverb that's off changes nothing.
+    CHECK(v(after("less reverb", dry), param::ReverbMix) == v(dry, param::ReverbMix));
+    CHECK(v(after("less reverb", dry), param::ReverbOn) == 0.0f);
+    const auto cathedral = after("make it sound like a cathedral", p);
+    CHECK(v(cathedral, param::ReverbDecaySec) > v(p, param::ReverbDecaySec));
+    CHECK(v(cathedral, param::ReverbSize) > v(p, param::ReverbSize));
     // More of a reverb that's on also lengthens its tail, by how much was asked for.
     const float tail = v(p, param::ReverbDecaySec);
-    CHECK_NEAR(v(after("more reverb", p), param::ReverbDecaySec), tail * 1.5f, 1e-3);
-    CHECK_NEAR(v(after("a bit more reverb", p), param::ReverbDecaySec), tail * 1.25f, 1e-3);
+    CHECK_NEAR(v(after("more reverb", p), param::ReverbDecaySec), tail * 1.15f, 1e-3);
+    CHECK_NEAR(v(after("a bit more reverb", p), param::ReverbDecaySec), tail * 1.075f, 1e-3);
     CHECK(v(after("a lot more reverb", p), param::ReverbDecaySec) > v(after("more reverb", p), param::ReverbDecaySec));
     CHECK(v(after("make it wetter", p), param::ReverbDecaySec) > tail);
     // Adding reverb that was off starts from its usual tail; less reverb leaves the tail.
     CHECK(v(wet, param::ReverbDecaySec) == v(dry, param::ReverbDecaySec));
     CHECK(v(after("less reverb", p), param::ReverbDecaySec) == tail);
+
+    // Reverb modes and tone. With the reverb named, sound words shape the
+    // reverb and leave the synth alone.
+    const auto plate = after("plate reverb", p);
+    CHECK(v(plate, param::ReverbMode) == static_cast<float>(dsp::ReverbMode::Plate));
+    CHECK(v(after("give it a small room reverb", p), param::ReverbMode) == static_cast<float>(dsp::ReverbMode::Room));
+    CHECK(v(after("chamber", p), param::ReverbMode) == static_cast<float>(dsp::ReverbMode::Chamber));
+    const auto darkVerb = after("darker reverb", p);
+    CHECK(v(darkVerb, param::FilterCutoffHz) == 1500.0f);
+    CHECK(v(darkVerb, param::ReverbHighCutHz) < 20000.0f);
+    CHECK(v(darkVerb, param::ReverbDamping) > v(p, param::ReverbDamping));
+    CHECK(v(after("make the reverb darker", p), param::ReverbHighCutHz) < 20000.0f);
+    CHECK(v(after("make the reverb darker", p), param::FilterCutoffHz) == 1500.0f);
+    CHECK(v(after("brighter reverb", darkVerb), param::ReverbHighCutHz) > v(darkVerb, param::ReverbHighCutHz));
+    const auto vintage = after("shimmer-free vintage hall", p);
+    CHECK(v(vintage, param::ReverbMode) == static_cast<float>(dsp::ReverbMode::Vintage));
+    CHECK(v(vintage, param::ReverbSize) >= 0.6f && v(vintage, param::ReverbDecaySec) >= 2.5f);
+    CHECK(v(vintage, param::ReverbHighCutHz) <= 9000.0f);
+    CHECK(v(vintage, param::EqHighGainDb) == v(p, param::EqHighGainDb));
+    CHECK(v(vintage, param::EqOn) == v(p, param::EqOn));
+    CHECK(v(vintage, param::FilterCutoffHz) == 1500.0f);
+    CHECK(v(vintage, param::ReverbMix) == v(p, param::ReverbMix));
+    const auto lush = after("lush reverb", p);
+    CHECK(v(lush, param::ReverbModDepth) > v(p, param::ReverbModDepth));
+    CHECK(v(lush, param::UnisonVoices) == v(p, param::UnisonVoices));
+    CHECK(v(after("lush", p), param::UnisonVoices) > 1.0f); // without the reverb, it's the synth
+    const auto steady = after("reverb with no chorus", p);
+    CHECK(v(steady, param::ReverbModDepth) < v(p, param::ReverbModDepth));
+    CHECK(v(steady, param::ReverbOn) == 1.0f);
+    CHECK(v(after("less muddy reverb", p), param::ReverbLowCutHz) >= 200.0f);
+    CHECK(v(after("smoother reverb", p), param::ReverbDiffusion) > v(p, param::ReverbDiffusion));
+    CHECK(v(after("mono reverb", p), param::ReverbWidth) == 0.0f);
+    auto room = p;
+    room[param::ReverbMode] = static_cast<float>(dsp::ReverbMode::Room);
+    const auto huge = after("huge reverb", room);
+    CHECK(v(huge, param::ReverbMode) == static_cast<float>(dsp::ReverbMode::Hall));
+    CHECK(v(huge, param::ReverbSize) > v(p, param::ReverbSize));
+    CHECK(v(huge, param::ReverbMix) > v(p, param::ReverbMix));
+    // There's no shimmer reverb: the reply says so, and the EQ is left alone.
+    Reply shimmerReply;
+    const auto shimmer = after("shimmer reverb", p, &shimmerReply);
+    CHECK(shimmerReply.text.find("shimmer") != std::string::npos);
+    CHECK(v(shimmer, param::EqOn) == v(p, param::EqOn));
+    CHECK(v(shimmer, param::ReverbMode) == static_cast<float>(dsp::ReverbMode::Plate));
+    // Shaping a reverb that's off brings it in, at a level you can hear.
+    const auto platedIn = after("plate reverb", dry);
+    CHECK(v(platedIn, param::ReverbOn) == 1.0f && v(platedIn, param::ReverbMix) >= 0.25f);
+    CHECK(v(after("turn off the plate reverb", p), param::ReverbOn) == 0.0f);
+    // A bare word right after a reverb request is about the reverb too.
+    const auto darkLush = after("make the reverb darker and lusher", p);
+    CHECK(v(darkLush, param::ReverbModDepth) > v(p, param::ReverbModDepth));
+    CHECK(v(darkLush, param::UnisonVoices) == v(p, param::UnisonVoices));
+    CHECK(v(after("plate reverb and make it brighter", p), param::FilterCutoffHz) > 1500.0f);
+    CHECK(interpret("darker plate reverb", p).complete);
+    CHECK(interpret("shimmer-free vintage hall", p).complete);
 
     // Other effects and character.
     const auto delayed = after("add some delay", dry);
@@ -295,7 +377,7 @@ void testDescribe()
     const std::string text = describePreset(preset);
     CHECK(text.find("saw") != std::string::npos);
     CHECK(text.find("1.5 kHz") != std::string::npos);
-    CHECK(text.find("reverb") != std::string::npos);
+    CHECK(text.find("reverb hall") != std::string::npos);
     CHECK(text.find("-12 st") != std::string::npos);
     CHECK(!helpText().empty());
 }
@@ -309,6 +391,11 @@ void testModelPrompt()
     CHECK(user.find("filter_cutoff_hz = 1500") != std::string::npos);
     CHECK(user.find("reverb_on = on") != std::string::npos);
     CHECK(user.find("Request: make it warmer") != std::string::npos);
+    // The model can reach the reverb's mode and tone, and is told that a
+    // darker reverb isn't a darker filter.
+    CHECK(user.find("reverb_mode = hall") != std::string::npos);
+    CHECK(user.find("reverb_highcut_hz") != std::string::npos);
+    CHECK(system.find("darker reverb") != std::string::npos);
 
     // The schema is valid JSON naming the parameters the model may use.
     const Json schema = modelReplySchema();

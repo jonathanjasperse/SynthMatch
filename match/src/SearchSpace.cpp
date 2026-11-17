@@ -77,6 +77,9 @@ const SearchSpace& SearchSpace::standard()
         // With more than one unison voice the sound is spread out, as most
         // stacked patches are. (Width can't be heard in the mono analysis.)
         s.base[param::UnisonSpread] = 0.6f;
+        // Start dry: the default patch's touch of reverb is for playing, not
+        // something to fight while matching a reference that has none.
+        s.base[param::ReverbOn] = 0.0f;
 
         const auto continuous = [&](int index, bool extended = false) { s.dims.push_back({index, {}, extended}); };
         const auto limited = [&](int index, float lo, float hi, bool extended = false) {
@@ -137,6 +140,9 @@ const SearchSpace& SearchSpace::standard()
         continuous(param::ReverbSize, true);
         continuous(param::ReverbDecaySec, true);
         continuous(param::ReverbDamping, true);
+        // The mode changes the build-up and the colour of the tail. (Its finer
+        // settings, like the wobble, pre-delay and width, are too subtle to search.)
+        choice(param::ReverbMode, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f}, true);
         return s;
     }();
     return space;
@@ -202,6 +208,7 @@ std::vector<bool> audibleDims(const SearchSpace& space, const ParamValues& p)
         case param::ReverbSize:
         case param::ReverbDecaySec:
         case param::ReverbDamping:
+        case param::ReverbMode:
             heard = reverbOn;
             break;
         case param::ReverbMix:
