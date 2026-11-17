@@ -1,20 +1,26 @@
 #include "synthmatch/match/Matcher.h"
 
+#include "synthmatch/dsp/Lfo.h"
 #include "synthmatch/dsp/Oscillator.h"
 #include "synthmatch/match/Encoder.h"
 #include "synthmatch/match/Features.h"
+#include "synthmatch/match/Modulation.h"
 #include "synthmatch/match/Optimizer.h"
 #include "synthmatch/match/Parallel.h"
 #include "synthmatch/match/Pitch.h"
 #include "synthmatch/match/SearchSpace.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <thread>
 
 namespace synthmatch::match {
 
 namespace {
+
+// How much closeness the clean-up after the search may give up for a simpler preset.
+constexpr double kSimplifyMarginDb = 0.15;
 
 SpectrogramConfig configFor(double sampleRate)
 {
@@ -47,6 +53,16 @@ public:
         settings_.tailSec = std::max(0.0, static_cast<double>(audio_.size()) / sampleRate_ - lastOff);
     }
 
+    // When the reference has a measured vibrato or tremolo, candidates are
+    // compared in a way that doesn't depend on the LFO's phase (Modulation.h).
+    // Without one, the distance is the plain spectral distance.
+    void useModulation(const ModulationEstimate& estimate)
+    {
+        profile_ = ModulationProfile(estimate, reference_, analyzer_, notes_);
+        if (profile_.active())
+            smoothedReference_ = profile_.smooth(reference_);
+    }
+
     std::vector<float> renderMono(const ParamValues& params, const MatchEqGains* eq = nullptr) const
     {
         Preset preset;
@@ -68,11 +84,16 @@ public:
             const float current = params[param::GainDb];
             score.gainDb = std::clamp(bestGainDb(reference_, spectrogram), gain.min - current, gain.max - current);
         }
-        score.distance = spectralDistance(reference_, spectrogram, score.gainDb);
+        if (profile_.active())
+            score.distance = spectralDistance(smoothedReference_, profile_.smooth(spectrogram), score.gainDb) +
+                             profile_.distance(spectrogram, score.gainDb);
+        else
+            score.distance = spectralDistance(reference_, spectrogram, score.gainDb);
         return score;
     }
 
     const std::vector<float>& audio() const { return audio_; }
+    double durationSec() const { return static_cast<double>(audio_.size()) / sampleRate_; }
     const Spectrogram& reference() const { return reference_; }
     const SpectrogramAnalyzer& analyzer() const { return analyzer_; }
     double sampleRate() const { return sampleRate_; }
@@ -85,11 +106,29 @@ private:
     SpectrogramAnalyzer analyzer_;
     Spectrogram reference_;
     RenderSettings settings_;
+    ModulationProfile profile_;
+    Spectrogram smoothedReference_;
 };
 
-// Rough envelope and brightness measurements, to start the search somewhere sensible.
-void applyMeasuredGuess(const Objective& objective, ParamValues& params)
+// Rough envelope, brightness and modulation measurements, to start the search
+// somewhere sensible.
+void applyMeasuredGuess(const Objective& objective, const ModulationEstimate& modulation, ParamValues& params)
 {
+    const auto set = [&](int index, double value) {
+        params[static_cast<std::size_t>(index)] = clampToRange(spec(index), static_cast<float>(value));
+    };
+    if (modulation.vibrato.found) {
+        set(param::Lfo1Target, static_cast<double>(dsp::LfoTarget::Pitch));
+        set(param::Lfo1Wave, static_cast<double>(dsp::LfoWave::Sine));
+        set(param::Lfo1RateHz, modulation.vibrato.rateHz);
+        set(param::Lfo1Depth, vibratoDepth(modulation.vibrato.cents));
+    } else if (modulation.tremolo.found) {
+        set(param::Lfo1Target, static_cast<double>(dsp::LfoTarget::Amp));
+        set(param::Lfo1Wave, static_cast<double>(dsp::LfoWave::Sine));
+        set(param::Lfo1RateHz, modulation.tremolo.rateHz);
+        set(param::Lfo1Depth, tremoloDepth(modulation.tremolo.db));
+    }
+
     const auto& ref = objective.reference();
     const auto& config = objective.analyzer().config();
     const double hopSec = static_cast<double>(config.hop) / objective.sampleRate();
@@ -163,9 +202,6 @@ void applyMeasuredGuess(const Objective& objective, ParamValues& params)
         }
     }
 
-    const auto set = [&](int index, double value) {
-        params[static_cast<std::size_t>(index)] = clampToRange(spec(index), static_cast<float>(value));
-    };
     set(param::AmpAttackMs, std::max(1.0, attackMs));
     set(param::AmpDecayMs, std::max(5.0, decayMs));
     set(param::AmpSustain, sustain);
@@ -407,7 +443,169 @@ std::vector<float> matchedSection(const StereoBuffer& reference, double& rate, s
     return mono;
 }
 
+// See simplifyPreset. `score` is the score of `params` (with `eq`) and is
+// updated with each change kept. Together the changes cost at most `marginDb`.
+void simplify(const Objective& objective, ParamValues& params, const MatchEqGains* eq, Objective::Score& score,
+              double marginDb)
+{
+    const double limit = score.distance + marginDb;
+    const auto tryInstead = [&](const ParamValues& changed) {
+        const auto s = objective.evaluate(changed, eq);
+        if (s.distance > limit)
+            return false;
+        params = changed;
+        score = s;
+        return true;
+    };
+    const auto value = [&](int index) { return params[static_cast<std::size_t>(index)]; };
+
+    // A delay whose first echo comes after the recording ends can't be heard
+    // in it, and a mix above 0.5 only turns the dry sound down (the gain makes
+    // up for it). Either way the preset would play loud echoes the recording
+    // doesn't have.
+    if (value(param::DelayOn) >= 0.5f && !objective.notes().empty()) {
+        const double firstEcho = objective.notes().front().startSec + 0.001 * value(param::DelayTimeMs);
+        const bool tooWet = value(param::DelayMix) > 0.5f;
+        if (tooWet || firstEcho >= objective.durationSec()) {
+            auto off = params;
+            off[param::DelayOn] = 0.0f;
+            if (!tryInstead(off) && tooWet) {
+                auto capped = params;
+                capped[param::DelayMix] = 0.5f;
+                tryInstead(capped);
+            }
+        }
+    }
+
+    // A pitch LFO that steps (square, saw, random), is slow, or goes deeper
+    // than a semitone works as a hidden transpose: within the recording it
+    // holds one pitch, but held notes jump when played from a keyboard.
+    const auto target = static_cast<dsp::LfoTarget>(static_cast<int>(value(param::Lfo1Target)));
+    const double depth = value(param::Lfo1Depth);
+    if (target == dsp::LfoTarget::Pitch && depth > 0.0) {
+        const auto wave = static_cast<dsp::LfoWave>(static_cast<int>(value(param::Lfo1Wave)));
+        const bool stepped = wave == dsp::LfoWave::Square || wave == dsp::LfoWave::Saw || wave == dsp::LfoWave::Random;
+        const double semitones = dsp::kLfoPitchSemitones * depth * depth;
+        if (stepped || value(param::Lfo1RateHz) < 2.0f || semitones > 1.0) {
+            auto off = params;
+            off[param::Lfo1Target] = static_cast<float>(dsp::LfoTarget::Off);
+            if (!tryInstead(off)) {
+                auto vibrato = params;
+                vibrato[param::Lfo1Wave] = static_cast<float>(dsp::LfoWave::Sine);
+                vibrato[param::Lfo1RateHz] = std::max(value(param::Lfo1RateHz), 2.0f);
+                vibrato[param::Lfo1Depth] = static_cast<float>(std::min(depth, std::sqrt(1.0 / dsp::kLfoPitchSemitones)));
+                tryInstead(vibrato);
+            }
+        }
+    }
+}
+
+// How loud a preset sounds playing the objective's notes: the power in each
+// band the matcher hears, A-weighted, so a deep sub counts for less than the
+// same power in the midrange (as it does to the ear).
+double loudnessDb(const Objective& objective, const ParamValues& params, const MatchEqGains* eq)
+{
+    const auto& analyzer = objective.analyzer();
+    const auto spectrogram = analyzer.analyze(objective.renderMono(params, eq));
+    std::vector<double> weight(spectrogram.numBands);
+    for (std::size_t b = 0; b < weight.size(); ++b) {
+        const double f2 = analyzer.bandHz(b) * analyzer.bandHz(b);
+        const double a = 12194.0 * 12194.0 * f2 * f2 /
+                         ((f2 + 20.6 * 20.6) * std::sqrt((f2 + 107.7 * 107.7) * (f2 + 737.9 * 737.9)) * (f2 + 12194.0 * 12194.0));
+        weight[b] = a * a;
+    }
+    double sum = 0.0;
+    for (std::size_t f = 0; f < spectrogram.numFrames; ++f)
+        for (std::size_t b = 0; b < spectrogram.numBands; ++b)
+            sum += std::pow(10.0, spectrogram.at(f, b) / 10.0) * weight[b];
+    return 10.0 * std::log10(sum + 1.0e-30);
+}
+
+// Moves the key so the preset's loudest oscillator plays the notes, to the
+// nearest octave. Returns how far the notes moved up; `preset` and `notes`
+// are changed to match, so the sound stays the same.
+int normaliseKey(const Objective& objective, Preset& preset, std::vector<NoteEvent>& notes)
+{
+    // How loud each oscillator is on its own, through the rest of the preset.
+    std::array<double, param::kNumOscs> powerDb{};
+    int loudest = -1;
+    const auto level = [&](const ParamValues& p, int k) { return p[static_cast<std::size_t>(param::osc(k, param::OscLevel))]; };
+    for (int k = 0; k < param::kNumOscs; ++k) {
+        if (level(preset.params, k) <= 0.02f)
+            continue;
+        auto solo = preset.params;
+        for (int j = 0; j < param::kNumOscs; ++j)
+            if (j != k)
+                solo[static_cast<std::size_t>(param::osc(j, param::OscLevel))] = 0.0f;
+        solo[param::NoiseLevel] = 0.0f;
+        powerDb[static_cast<std::size_t>(k)] = loudnessDb(objective, solo, &preset.matchEq);
+        if (loudest < 0 || powerDb[static_cast<std::size_t>(k)] > powerDb[static_cast<std::size_t>(loudest)])
+            loudest = k;
+    }
+    if (loudest < 0)
+        return 0;
+
+    // Never below the note found: the recording repeats at the period of its
+    // lowest part, so the key is at or above it.
+    const auto octaveOf = [&](int k) {
+        const float coarse = preset.params[static_cast<std::size_t>(param::osc(k, param::OscCoarse))];
+        return std::max(0, 12 * static_cast<int>(std::lround(coarse / 12.0)));
+    };
+    int shift = octaveOf(loudest);
+    // An oscillator within 1 dB of the loudest is as good a choice: take the
+    // one that needs the smallest move, so a near tie doesn't flip the key.
+    for (int k = 0; k < param::kNumOscs; ++k)
+        if (level(preset.params, k) > 0.02f &&
+            powerDb[static_cast<std::size_t>(k)] >= powerDb[static_cast<std::size_t>(loudest)] - 1.0 && octaveOf(k) < shift)
+            shift = octaveOf(k);
+
+    // Settle for a smaller move when the notes or the oscillators would leave their range.
+    for (; shift > 0; shift -= 12) {
+        bool fits = true;
+        for (const auto& n : notes)
+            fits = fits && n.note + shift >= 0 && n.note + shift <= 127;
+        auto moved = preset.params;
+        if (fits && moveKey(moved, shift)) {
+            preset.params = moved;
+            for (auto& n : notes)
+                n.note += shift;
+            break;
+        }
+    }
+    return shift;
+}
+
 } // namespace
+
+bool moveKey(ParamValues& params, int semitones)
+{
+    if (semitones == 0)
+        return true;
+    ParamValues moved = params;
+    const auto& coarseSpec = spec(param::Osc1Coarse);
+    for (int k = 0; k < param::kNumOscs; ++k) {
+        const auto coarse = static_cast<std::size_t>(param::osc(k, param::OscCoarse));
+        const float value = params[coarse] - static_cast<float>(semitones);
+        if (value < coarseSpec.min || value > coarseSpec.max) {
+            if (params[static_cast<std::size_t>(param::osc(k, param::OscLevel))] > 0.0f)
+                return false;
+            moved[coarse] = std::clamp(value, coarseSpec.min, coarseSpec.max); // silent: can't be heard
+        } else {
+            moved[coarse] = value;
+        }
+    }
+    // The cutoff follows the note by filter_keytrack octaves per octave.
+    const float keyTrack = params[param::FilterKeyTrack];
+    if (keyTrack != 0.0f) {
+        const auto& cutoffSpec = spec(param::FilterCutoffHz);
+        const double cutoff = params[param::FilterCutoffHz] * std::exp2(-keyTrack * semitones / 12.0);
+        if (cutoff < cutoffSpec.min || cutoff > cutoffSpec.max)
+            return false;
+        moved[param::FilterCutoffHz] = static_cast<float>(cutoff);
+    }
+    params = moved;
+    return true;
+}
 
 double MatchResult::score() const { return 100.0 * std::exp(-distance / 10.0); }
 
@@ -444,9 +642,15 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
     // The search runs at half the sample rate when it can: half the rendering
     // and half the analysis for each candidate. The result is checked, and the
     // EQ match made, at the full rate.
-    const Objective full(section, rate, detection.notes);
+    Objective full(section, rate, detection.notes);
     const bool halve = rate >= 44100.0;
-    const Objective search(halve ? decimateBy2(section) : section, halve ? rate / 2.0 : rate, detection.notes, false);
+    Objective search(halve ? decimateBy2(section) : section, halve ? rate / 2.0 : rate, detection.notes, false);
+
+    // Vibrato and tremolo, measured once, so both objectives judge them the same way.
+    const auto modulation = measureModulation(detection.pitch, search.reference(), search.analyzer(), detection.notes);
+    full.useModulation(modulation);
+    search.useModulation(modulation);
+    result.modulation = modulation;
 
     const SearchSpace& space = SearchSpace::standard();
 
@@ -455,10 +659,10 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
     for (const auto& n : detection.notes)
         onePitch = onePitch && n.note == detection.notes.front().note;
 
-    // Starting points: the measured envelope and brightness with each
-    // waveform, and the encoder's guess when a trained model is available.
+    // Starting points: the measured envelope, brightness and modulation with
+    // each waveform, and the encoder's guess when a trained model is available.
     ParamValues measured = space.base;
-    applyMeasuredGuess(search, measured);
+    applyMeasuredGuess(search, modulation, measured);
     std::vector<std::vector<double>> starts;
     for (const dsp::Wave wave : {dsp::Wave::Saw, dsp::Wave::Square, dsp::Wave::Triangle, dsp::Wave::Sine}) {
         for (const double brightness : {1.0, 0.35, 0.0}) {
@@ -476,9 +680,24 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
     if (options.encoder && options.encoder->valid()) {
         // The encoder listens to the first note only, up to where the next one starts.
         const double firstNoteEnd = detection.notes.size() > 1 ? detection.notes[1].startSec : -1.0;
-        auto guess = options.encoder->predict(search.audio(), search.sampleRate(), detection.notes.front(), firstNoteEnd);
-        if (guess.size() == space.dims.size())
-            starts.push_back(std::move(guess));
+        auto guess = options.encoder->predict(search.audio(), search.sampleRate(), detection.notes.front(), firstNoteEnd,
+                                              detection.pitch);
+        if (guess.size() == space.dims.size()) {
+            // And the same guess with the measured vibrato or tremolo.
+            if (modulation.found()) {
+                auto withLfo = guess;
+                for (std::size_t d = 0; d < space.dims.size(); ++d) {
+                    const int index = space.dims[d].param;
+                    if (index == param::Lfo1Target || index == param::Lfo1Wave || index == param::Lfo1RateHz ||
+                        index == param::Lfo1Depth)
+                        withLfo[d] = space.dims[d].fromValue(measured[static_cast<std::size_t>(index)]);
+                }
+                starts.push_back(std::move(guess));
+                starts.push_back(std::move(withLfo));
+            } else {
+                starts.push_back(std::move(guess));
+            }
+        }
     }
     // Each attempt is a whole search from those starting points with its own
     // seed (seed, seed + 1, ...), and the closest result wins. Progress runs
@@ -507,8 +726,10 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
         const auto startDistances = state.evaluate(starts);
         if (a == 0) {
             result.startDistance = state.bestDistance();
-            result.usedEncoder = startDistances.size() > encoderIndex &&
-                                 startDistances[encoderIndex] <= *std::min_element(startDistances.begin(), startDistances.end());
+            result.usedEncoder =
+                startDistances.size() > encoderIndex &&
+                *std::min_element(startDistances.begin() + static_cast<std::ptrdiff_t>(encoderIndex), startDistances.end()) <=
+                    *std::min_element(startDistances.begin(), startDistances.end());
 
             // The best few starting points that differ from each other (another
             // waveform, or clearly different settings), so the search explores
@@ -548,8 +769,17 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
         state.sweepChoices(core);
 
         std::vector<double> spread(all.size());
-        for (std::size_t k = 0; k < all.size(); ++k)
-            spread[k] = space.dims[all[k]].extended ? 0.25 : 0.08;
+        for (std::size_t k = 0; k < all.size(); ++k) {
+            const auto& dim = space.dims[all[k]];
+            spread[k] = dim.extended ? 0.25 : 0.08;
+            // A measured vibrato or tremolo only needs fine-tuning: its rate is
+            // close already (this step is about 7% of it), and the distance
+            // is sharp around it.
+            if (modulation.found() && dim.param == param::Lfo1RateHz)
+                spread[k] = 0.02;
+            if (modulation.found() && dim.param == param::Lfo1Depth)
+                spread[k] = 0.05;
+        }
         state.sweepChoices(all);
         const int polishBudget = static_cast<int>(0.1 * remaining);
         state.runStage(all, spread, std::max(0, options.budget - state.evaluations() - polishBudget - 60), attempt.seed + 1);
@@ -583,6 +813,9 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
             preset.params = params;
         }
     }
+    // Drop what the recording gives no evidence for, while the gain is still
+    // the search's (the level is fitted again for each change).
+    simplify(full, preset.params, nullptr, score, kSimplifyMarginDb);
     const auto applyGain = [&](float gainDb) {
         preset.params[param::GainDb] = clampToRange(spec(param::GainDb), preset.params[param::GainDb] + gainDb);
     };
@@ -601,6 +834,11 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
             result.distance = withEq.distance;
         }
     }
+
+    // The key: a sub-oscillator makes the recording repeat an octave or two
+    // below the key that was played, and the notes found are that low. Move
+    // them up to the loudest oscillator, and the oscillators down to match.
+    result.keyShift = normaliseKey(full, preset, result.notes);
 
     result.preset = preset;
     result.evaluations = evaluations;
@@ -627,8 +865,20 @@ std::vector<float> encoderInputFor(const StereoBuffer& recording, double maxSeco
         rate /= 2.0;
     }
     const double firstNoteEnd = detection.notes.size() > 1 ? detection.notes[1].startSec : -1.0;
-    return encoderFeatures(section, rate, detection.notes.front(), firstNoteEnd);
+    return encoderFeatures(section, rate, detection.notes.front(), firstNoteEnd, detection.pitch);
 }
+
+namespace {
+
+// An objective for a whole recording and given notes, judging modulation as matchSound does.
+Objective objectiveFor(const std::vector<float>& mono, double rate, std::span<const NoteEvent> notes)
+{
+    Objective objective(mono, rate, std::vector<NoteEvent>(notes.begin(), notes.end()));
+    objective.useModulation(measureModulation(trackPitch(mono, rate), objective.reference(), objective.analyzer(), notes));
+    return objective;
+}
+
+} // namespace
 
 double presetDistance(const StereoBuffer& reference, const Preset& preset, std::span<const NoteEvent> notes)
 {
@@ -637,8 +887,24 @@ double presetDistance(const StereoBuffer& reference, const Preset& preset, std::
     const auto mono = matchedSection(reference, rate, error);
     if (mono.empty())
         return 1.0e3;
-    const Objective objective(mono, rate, std::vector<NoteEvent>(notes.begin(), notes.end()));
-    return objective.evaluate(preset.params, &preset.matchEq, false).distance;
+    return objectiveFor(mono, rate, notes).evaluate(preset.params, &preset.matchEq, false).distance;
+}
+
+Preset simplifyPreset(const StereoBuffer& reference, const Preset& preset, std::span<const NoteEvent> notes, double marginDb)
+{
+    double rate = 0.0;
+    std::string error;
+    const auto mono = matchedSection(reference, rate, error);
+    if (mono.empty() || notes.empty())
+        return preset;
+    const auto objective = objectiveFor(mono, rate, notes);
+    Preset out = preset;
+    const auto before = objective.evaluate(out.params, &out.matchEq);
+    auto score = before;
+    simplify(objective, out.params, &out.matchEq, score, marginDb);
+    // Keep the level: make up for what the changes added or took away.
+    out.params[param::GainDb] = clampToRange(spec(param::GainDb), out.params[param::GainDb] + score.gainDb - before.gainDb);
+    return out;
 }
 
 } // namespace synthmatch::match

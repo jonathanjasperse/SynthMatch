@@ -30,6 +30,9 @@ struct NoteDetection {
     std::size_t startSample = 0;   // where the analysed section starts in the input
     std::size_t numSamples = 0;    // and how long it is
     double confidence = 0.0;       // 0..1: how clearly pitched the recording is
+    // The pitch track the notes were found from, over the analysed section.
+    // Times are relative to startSample (frames just before it are negative).
+    std::vector<PitchFrame> pitch;
 };
 
 // Finds the notes in the first `maxSeconds` of sound (leading silence is

@@ -127,8 +127,19 @@ int main(int argc, char** argv)
         return fail(result.error);
 
     std::printf("Notes found (pitch confidence %.0f%%):\n", result.pitchConfidence * 100.0);
-    for (const auto& n : result.notes)
-        std::printf("  %-4s at %.2f s for %.2f s\n", noteName(n.note), n.startSec, n.durationSec);
+    for (const auto& n : result.notes) {
+        std::printf("  %-4s at %.2f s for %.2f s", noteName(n.note), n.startSec, n.durationSec);
+        if (result.keyShift != 0)
+            std::printf("  (detected as %s)", noteName(n.note - result.keyShift));
+        std::printf("\n");
+    }
+    if (result.keyShift != 0)
+        std::printf("Moved the notes %+d semitones, so the loudest oscillator plays them.\n", result.keyShift);
+    const auto& wobble = result.modulation;
+    if (wobble.vibrato.found)
+        std::printf("Vibrato: %.2f Hz, +/- %.0f cents\n", wobble.vibrato.rateHz, wobble.vibrato.cents);
+    else if (wobble.tremolo.found)
+        std::printf("Tremolo: %.2f Hz, +/- %.1f dB\n", wobble.tremolo.rateHz, wobble.tremolo.db);
     std::printf("Distance: start %.2f dB -> search %.2f dB -> with EQ match %.2f dB%s\n", result.startDistance,
                 result.searchDistance, result.distance, result.usedEncoder ? "  (started from the encoder's guess)" : "");
     std::printf("Match score: %.0f / 100   (%d sounds tried in %.1f s)\n", result.score(), result.evaluations, seconds);

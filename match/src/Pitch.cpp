@@ -476,6 +476,14 @@ NoteDetection detectNotes(std::span<const float> mono, double sampleRate, double
 
     result.startSample = firstSample;
     result.numSamples = static_cast<std::size_t>(std::max(0.0, endSec - originSec) * sampleRate);
+
+    // Keep the track over the section, for measuring vibrato (Modulation.h).
+    for (const auto& f : frames) {
+        if (f.timeSec < originSec - 0.05 || f.timeSec > endSec + 0.05)
+            continue;
+        result.pitch.push_back(f);
+        result.pitch.back().timeSec -= originSec;
+    }
     return result;
 }
 

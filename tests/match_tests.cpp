@@ -2,12 +2,14 @@
 // and the encoder. Plain asserts, no framework; run through CTest.
 
 #include "synthmatch/Render.h"
+#include "synthmatch/dsp/Lfo.h"
 #include "synthmatch/dsp/MatchEq.h"
 #include "synthmatch/dsp/Oscillator.h"
 #include "synthmatch/match/Encoder.h"
 #include "synthmatch/match/Features.h"
 #include "synthmatch/match/Fft.h"
 #include "synthmatch/match/Matcher.h"
+#include "synthmatch/match/Modulation.h"
 #include "synthmatch/match/Optimizer.h"
 #include "synthmatch/match/Pitch.h"
 #include "synthmatch/match/SearchSpace.h"
@@ -15,9 +17,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -80,6 +84,25 @@ StereoBuffer renderNotes(const ParamValues& params, std::vector<NoteEvent> notes
     settings.sampleRate = sampleRate;
     settings.tailSec = tail;
     return render(params, notes, settings);
+}
+
+double rmsDb(std::span<const float> x)
+{
+    double sum = 0.0;
+    for (const float v : x)
+        sum += static_cast<double>(v) * v;
+    return 10.0 * std::log10(sum / static_cast<double>(std::max<std::size_t>(1, x.size())) + 1e-30);
+}
+
+// The part of a recording from `start` on, as a new recording.
+StereoBuffer cropped(const StereoBuffer& audio, std::size_t start, std::size_t count = std::size_t(-1))
+{
+    StereoBuffer out;
+    out.sampleRate = audio.sampleRate;
+    const std::size_t end = std::min(audio.numFrames(), count == std::size_t(-1) ? audio.numFrames() : start + count);
+    out.left.assign(audio.left.begin() + static_cast<std::ptrdiff_t>(start), audio.left.begin() + static_cast<std::ptrdiff_t>(end));
+    out.right.assign(audio.right.begin() + static_cast<std::ptrdiff_t>(start), audio.right.begin() + static_cast<std::ptrdiff_t>(end));
+    return out;
 }
 
 // ---------------------------------------------------------------- analysis
@@ -205,6 +228,276 @@ void testPitchAndNotes()
     // Silence has no notes.
     const std::vector<float> silence(48000, 0.0f);
     CHECK(detectNotes(silence, 48000.0).notes.empty());
+}
+
+// ---------------------------------------------------------------- modulation
+
+// A held saw on A3 with a gentle filter, for the vibrato and tremolo tests.
+ParamValues heldSaw()
+{
+    auto p = defaultValues();
+    p[param::Osc1Wave] = static_cast<float>(dsp::Wave::Saw);
+    p[param::FilterCutoffHz] = 3000.0f;
+    p[param::AmpReleaseMs] = 80.0f;
+    return p;
+}
+
+ParamValues withLfo(ParamValues p, dsp::LfoTarget target, double rateHz, double depth,
+                    dsp::LfoWave wave = dsp::LfoWave::Sine)
+{
+    p[param::Lfo1Target] = static_cast<float>(target);
+    p[param::Lfo1Wave] = static_cast<float>(wave);
+    p[param::Lfo1RateHz] = static_cast<float>(rateHz);
+    p[param::Lfo1Depth] = static_cast<float>(depth);
+    return p;
+}
+
+// Measures a recording's modulation the way the matcher does.
+ModulationEstimate measure(const StereoBuffer& audio)
+{
+    const auto mono = toMono(audio.left, audio.right);
+    const auto found = detectNotes(mono, audio.sampleRate);
+    const std::vector<float> section(mono.begin() + static_cast<std::ptrdiff_t>(found.startSample),
+                                     mono.begin() + static_cast<std::ptrdiff_t>(found.startSample + found.numSamples));
+    SpectrogramConfig config;
+    config.fftSize = 2048;
+    config.hop = 512;
+    const SpectrogramAnalyzer analyzer(audio.sampleRate, config);
+    return measureModulation(found.pitch, analyzer.analyze(section), analyzer, found.notes);
+}
+
+void testModulation()
+{
+    // The depth conversions are the engine's: 12 * depth^2 semitones of
+    // vibrato, and a level that swings between 1 and 1 - depth.
+    CHECK_NEAR(vibratoDepth(27.0), 0.15, 1e-6);
+    CHECK_NEAR(tremoloDepth(-10.0 * std::log10(0.7)), 0.3, 1e-6);
+
+    const std::vector<NoteEvent> held{{0.05, 2.0, 57, 1.0f}};
+
+    // Vibrato at 5.5 Hz, 27 cents.
+    const auto vibrato = measure(renderNotes(withLfo(heldSaw(), dsp::LfoTarget::Pitch, 5.5, vibratoDepth(27.0)), held, 0.3));
+    CHECK(vibrato.vibrato.found);
+    CHECK(!vibrato.tremolo.found);
+    CHECK_NEAR(vibrato.vibrato.rateHz, 5.5, 0.02 * 5.5);
+    CHECK_NEAR(vibrato.vibrato.cents, 27.0, 2.7);
+    CHECK_NEAR(vibrato.rateHz(), vibrato.vibrato.rateHz, 1e-12);
+
+    // Tremolo at 6 Hz, depth 0.3.
+    const auto tremolo = measure(renderNotes(withLfo(heldSaw(), dsp::LfoTarget::Amp, 6.0, 0.3), held, 0.3));
+    CHECK(!tremolo.vibrato.found);
+    CHECK(tremolo.tremolo.found);
+    CHECK_NEAR(tremolo.tremolo.rateHz, 6.0, 0.12);
+    CHECK_NEAR(tremoloDepth(tremolo.tremolo.db), 0.3, 0.05);
+
+    // Look-alikes: beating between detuned copies, and a moving cutoff. They
+    // wobble the level, and a little the pitch, but they aren't vibrato or tremolo.
+    auto unison = heldSaw();
+    unison[param::UnisonVoices] = 7.0f;
+    unison[param::UnisonDetune] = 35.0f;
+    auto pair = heldSaw();
+    pair[param::Osc2Level] = 1.0f;
+    pair[param::Osc2Fine] = 7.0f;
+    auto cutoff = withLfo(heldSaw(), dsp::LfoTarget::Cutoff, 2.0, 0.3);
+    cutoff[param::FilterCutoffHz] = 1000.0f;
+    const std::vector<NoteEvent> high{{0.05, 2.0, 81, 1.0f}};
+    for (const auto& [params, notes] : {std::pair{unison, high}, std::pair{pair, high}, std::pair{cutoff, held},
+                                        std::pair{heldSaw(), held}}) {
+        const auto m = measure(renderNotes(params, notes, 0.3));
+        CHECK(!m.vibrato.found);
+        CHECK(!m.tremolo.found);
+        CHECK(!m.found());
+    }
+}
+
+void testModulationDistance()
+{
+    // A vibrato recorded half a cycle into its swing: the synth's LFO always
+    // starts at the top of the note, so it can never line up with this one.
+    const double rate = 5.5;
+    const auto vibrato = withLfo(heldSaw(), dsp::LfoTarget::Pitch, rate, vibratoDepth(27.0));
+    const auto full = renderNotes(vibrato, {{0.0, 2.2, 57, 1.0f}}, 0.3);
+    const auto start = static_cast<std::size_t>(0.5 / rate * full.sampleRate);
+    const auto reference = cropped(full, start);
+    const std::vector<NoteEvent> notes{{0.0, 2.2 - 0.5 / rate, 57, 1.0f}};
+
+    // The right vibrato still scores closer than none, and closer than a wrong rate.
+    Preset right, none, fast;
+    right.params = vibrato;
+    none.params = heldSaw();
+    fast.params = withLfo(heldSaw(), dsp::LfoTarget::Pitch, rate * 1.1, vibratoDepth(27.0));
+    const double rightDistance = presetDistance(reference, right, notes);
+    const double noneDistance = presetDistance(reference, none, notes);
+    const double fastDistance = presetDistance(reference, fast, notes);
+    std::printf("vibrato half a cycle out: right %.2f, none %.2f, 10%% fast %.2f\n", rightDistance, noneDistance, fastDistance);
+    CHECK(rightDistance < noneDistance);
+    CHECK(rightDistance < fastDistance);
+
+    // A steady sound is measured as it always was: no modulation, no profile,
+    // and the plain spectral distance at the level the preset plays at.
+    const ModulationProfile inactive;
+    CHECK(!inactive.active());
+    {
+        const std::vector<NoteEvent> held{{0.0, 0.8, 57, 1.0f}};
+        const auto steady = renderNotes(heldSaw(), held, 0.3);
+        CHECK(!measure(steady).found());
+        Preset darker;
+        darker.params = heldSaw();
+        darker.params[param::FilterCutoffHz] = 1200.0f;
+        RenderSettings settings;
+        settings.sampleRate = steady.sampleRate;
+        settings.tailSec = static_cast<double>(steady.numFrames()) / steady.sampleRate - 0.8;
+        const auto played = render(darker, held, settings);
+        SpectrogramConfig config;
+        config.fftSize = 2048;
+        config.hop = 512;
+        const SpectrogramAnalyzer analyzer(steady.sampleRate, config);
+        const double plain = spectralDistance(analyzer.analyze(toMono(steady.left, steady.right)),
+                                              analyzer.analyze(toMono(played.left, played.right)));
+        CHECK(plain > 0.5);
+        CHECK_NEAR(presetDistance(steady, darker, held), plain, 1e-9);
+    }
+}
+
+void testMatchFindsVibrato()
+{
+    // The same out-of-phase vibrato, matched from scratch.
+    const double rate = 5.5;
+    const auto vibrato = withLfo(heldSaw(), dsp::LfoTarget::Pitch, rate, vibratoDepth(27.0));
+    const auto full = renderNotes(vibrato, {{0.0, 2.2, 57, 1.0f}}, 0.3);
+    const auto reference = cropped(full, static_cast<std::size_t>(0.5 / rate * full.sampleRate));
+
+    MatchOptions options;
+    options.budget = 3000;
+    options.threads = 2;
+    const auto result = matchSound(reference, options);
+    CHECK(result.ok);
+    if (!result.ok)
+        return;
+    const auto& p = result.preset.params;
+    std::printf("vibrato match: distance %.2f dB, lfo1 %s at %.2f Hz, depth %.3f\n", result.distance,
+                std::string(choiceName(spec(param::Lfo1Target), p[param::Lfo1Target])).c_str(), p[param::Lfo1RateHz],
+                p[param::Lfo1Depth]);
+    CHECK(p[param::Lfo1Target] == static_cast<float>(dsp::LfoTarget::Pitch));
+    CHECK_NEAR(p[param::Lfo1RateHz], rate, 0.05 * rate);
+}
+
+// ---------------------------------------------------------------- the key
+
+void testMoveKey()
+{
+    // A key-tracked filter and a second oscillator two octaves up.
+    auto p = defaultValues();
+    p[param::FilterCutoffHz] = 800.0f;
+    p[param::FilterKeyTrack] = 0.6f;
+    p[param::FilterResonance] = 0.3f;
+    p[param::Osc2Level] = 0.7f;
+    p[param::Osc2Wave] = static_cast<float>(dsp::Wave::Square);
+    p[param::Osc2Coarse] = 24.0f;
+
+    auto moved = p;
+    CHECK(moveKey(moved, 24));
+    CHECK(moved[param::Osc1Coarse] == -24.0f);
+    CHECK(moved[param::Osc2Coarse] == 0.0f);
+    CHECK(moved[param::FilterCutoffHz] < p[param::FilterCutoffHz]);
+
+    // Played two octaves higher, it sounds exactly the same.
+    const auto before = renderNotes(p, {{0.0, 0.5, 33, 1.0f}}, 0.2);
+    const auto after = renderNotes(moved, {{0.0, 0.5, 57, 1.0f}}, 0.2);
+    CHECK(before.numFrames() == after.numFrames());
+    double largest = 0.0, peak = 0.0;
+    for (std::size_t i = 0; i < before.numFrames(); ++i) {
+        largest = std::max(largest, static_cast<double>(std::abs(before.left[i] - after.left[i])));
+        peak = std::max(peak, static_cast<double>(std::abs(before.left[i])));
+    }
+    CHECK(peak > 0.05);
+    CHECK(largest < 1e-5);
+
+    // Moving by nothing changes nothing.
+    auto same = p;
+    CHECK(moveKey(same, 0) && same == p);
+
+    // An audible oscillator can't be moved out of its range; nothing changes.
+    auto low = p;
+    low[param::Osc2Coarse] = -24.0f;
+    auto refused = low;
+    CHECK(!moveKey(refused, 24));
+    CHECK(refused == low);
+    // A silent one can (it is just kept in range).
+    low[param::Osc2Level] = 0.0f;
+    CHECK(moveKey(low, 24));
+    CHECK(low[param::Osc2Coarse] == spec(param::Osc2Coarse).min);
+}
+
+void testMatchMovesKey()
+{
+    // A saw on A2 with a quiet sine two octaves below: the whole waveform
+    // only repeats at the sub's period, so the note detected is A0. The
+    // preset is moved so its saw (the loudest part) plays A2.
+    auto p = defaultValues();
+    p[param::Osc1Wave] = static_cast<float>(dsp::Wave::Saw);
+    p[param::Osc1Level] = 1.0f;
+    p[param::Osc2Wave] = static_cast<float>(dsp::Wave::Sine);
+    p[param::Osc2Level] = 0.5f;
+    p[param::Osc2Coarse] = -24.0f;
+    p[param::AmpReleaseMs] = 100.0f;
+    const auto reference = renderNotes(p, {{0.05, 0.8, 45, 1.0f}}, 0.5);
+    const auto detected = detectNotes(toMono(reference.left, reference.right), reference.sampleRate);
+    CHECK(detected.notes.size() == 1 && detected.notes.front().note == 21);
+
+    MatchOptions options;
+    options.budget = 3000;
+    options.threads = 2;
+    const auto result = matchSound(reference, options);
+    CHECK(result.ok);
+    if (!result.ok)
+        return;
+    std::printf("key match: notes moved %+d to %d, distance %.2f dB\n", result.keyShift, result.notes.front().note,
+                result.distance);
+    CHECK(result.notes.size() == 1 && result.notes.front().note == 45);
+    CHECK(result.keyShift == 24);
+    // The moved preset on the moved notes is the sound that was matched.
+    CHECK_NEAR(presetDistance(cropped(reference, result.startSample, result.numSamples), result.preset, result.notes),
+               result.distance, 0.01);
+}
+
+// ---------------------------------------------------------------- clean-up
+
+void testSimplify()
+{
+    auto p = heldSaw();
+    p[param::GainDb] = -6.0f;
+    const std::vector<NoteEvent> notes{{0.0, 0.8, 45, 1.0f}};
+    const auto reference = renderNotes(p, notes, 0.4);
+
+    // An echo two seconds later, beyond the recording, with the mix up so the
+    // dry sound is quieter and the gain up to make up for it: the same sound
+    // in the recording, but loud echoes afterwards.
+    Preset echo;
+    echo.params = p;
+    echo.params[param::DelayOn] = 1.0f;
+    echo.params[param::DelayTimeMs] = 2000.0f;
+    echo.params[param::DelayMix] = 0.9f;
+    echo.params[param::GainDb] = p[param::GainDb] - static_cast<float>(20.0 * std::log10(2.0 * (1.0 - 0.9)));
+    CHECK(presetDistance(reference, echo, notes) < 0.2);
+    const auto plain = simplifyPreset(reference, echo, notes);
+    CHECK(plain.params[param::DelayOn] == 0.0f);
+    CHECK_NEAR(plain.params[param::GainDb], p[param::GainDb], 0.3);
+    CHECK(presetDistance(reference, plain, notes) < 0.2);
+
+    // A square pitch LFO too shallow to hear goes.
+    Preset shallow;
+    shallow.params = withLfo(p, dsp::LfoTarget::Pitch, 0.4, 0.04, dsp::LfoWave::Square);
+    CHECK(simplifyPreset(reference, shallow, notes).params[param::Lfo1Target] == 0.0f);
+
+    // But one the recording needs stays: here a slow square wave that holds
+    // the note a semitone up for as long as it plays.
+    const auto transposed = withLfo(p, dsp::LfoTarget::Pitch, 0.3, 0.3, dsp::LfoWave::Square);
+    const auto bent = renderNotes(transposed, notes, 0.4);
+    Preset needed;
+    needed.params = transposed;
+    const auto kept = simplifyPreset(bent, needed, notes);
+    CHECK(kept.params == needed.params);
 }
 
 // ---------------------------------------------------------------- EQ match
@@ -387,6 +680,29 @@ void testSearchSpace()
             index == param::FilterCutoffHz || index == param::ReverbOn)
             CHECK(audible[i]);
     }
+
+    // A pitch LFO is heard from about 3 cents (depth 0.05).
+    const auto lfoRateHeard = [&](float depth) {
+        auto q = space.base;
+        q[param::Lfo1Target] = static_cast<float>(dsp::LfoTarget::Pitch);
+        q[param::Lfo1Depth] = depth;
+        const auto heard = audibleDims(space, q);
+        for (std::size_t i = 0; i < space.dims.size(); ++i)
+            if (space.dims[i].param == param::Lfo1RateHz)
+                return static_cast<bool>(heard[i]);
+        return false;
+    };
+    CHECK(!lfoRateHeard(0.04f));
+    CHECK(lfoRateHeard(0.06f));
+
+    // The LFO rate is searched over vibrato and tremolo speeds, not the
+    // parameter's whole range.
+    for (const auto& dim : space.dims) {
+        if (dim.param == param::Lfo1RateHz) {
+            CHECK_NEAR(dim.toValue(0.0), 0.5, 1e-4);
+            CHECK_NEAR(dim.toValue(1.0), 15.0, 1e-3);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- matching
@@ -426,26 +742,39 @@ void testMatchRecoversSound()
     std::printf("match test: distance %.2f dB from a start of %.2f dB, %d sounds tried\n", result.distance,
                 result.startDistance, result.evaluations);
 
-    CHECK(result.notes.size() == 1 && result.notes[0].note == 45);
+    // The note detected, and the key the preset plays it from (whole octaves away at most).
+    CHECK(result.notes.size() == 1 && result.notes[0].note - result.keyShift == 45);
+    CHECK(result.keyShift % 12 == 0);
     CHECK(result.distance < 0.6 * result.startDistance);
     CHECK(result.distance < 4.0);
     CHECK(result.evaluations <= options.budget + 200);
     CHECK(result.score() > 60.0);
 
-    // The broad character is right, and the level too.
+    // The broad character is right.
     const auto& found = result.preset.params;
     CHECK(found[param::Osc1Wave] == static_cast<float>(dsp::Wave::Square));
     CHECK(found[param::FilterType] == 0.0f);
     CHECK(found[param::FilterCutoffHz] < 4000.0f);
-    CHECK_NEAR(found[param::GainDb], -6.0, 4.0);
+
+    // And the level: the preset plays as loud as the recording. Not GainDb
+    // itself: the oscillator levels, an effect's dry level and the amp
+    // envelope all trade against it, and the search may land on any of them.
+    {
+        double lastOff = 0.0;
+        for (const auto& n : result.notes)
+            lastOff = std::max(lastOff, n.startSec + n.durationSec);
+        RenderSettings settings;
+        settings.sampleRate = reference.sampleRate;
+        settings.tailSec = std::max(0.0, static_cast<double>(result.numSamples) / reference.sampleRate - lastOff);
+        const auto played = render(result.preset, result.notes, settings);
+        const auto mono = toMono(reference.left, reference.right);
+        const std::span<const float> section(mono.data() + result.startSample, result.numSamples);
+        CHECK_NEAR(rmsDb(toMono(played.left, played.right)), rmsDb(section), 1.5);
+        CHECK(found[param::GainDb] > spec(param::GainDb).min && found[param::GainDb] < spec(param::GainDb).max);
+    }
 
     // The reported distance is what an independent check measures.
-    CHECK_NEAR(presetDistance({reference.sampleRate,
-                               {reference.left.begin() + static_cast<std::ptrdiff_t>(result.startSample),
-                                reference.left.begin() + static_cast<std::ptrdiff_t>(result.startSample + result.numSamples)},
-                               {reference.right.begin() + static_cast<std::ptrdiff_t>(result.startSample),
-                                reference.right.begin() + static_cast<std::ptrdiff_t>(result.startSample + result.numSamples)}},
-                              result.preset, result.notes),
+    CHECK_NEAR(presetDistance(cropped(reference, result.startSample, result.numSamples), result.preset, result.notes),
                result.distance, 0.5);
 
     // The same seed gives the same answer.
@@ -537,13 +866,42 @@ void testEncoderFeatures()
     CHECK(a != b);
 
     // Random sounds stay inside every parameter's range, and differ.
-    for (std::uint32_t seed = 0; seed < 50; ++seed) {
+    int vibratos = 0;
+    for (std::uint32_t seed = 0; seed < 200; ++seed) {
         const auto sound = randomSound(space, seed);
         for (int i = 0; i < kNumParams; ++i)
             CHECK(sound.params[static_cast<std::size_t>(i)] == clampToRange(spec(i), sound.params[static_cast<std::size_t>(i)]));
         CHECK(sound.note.note >= 28 && sound.note.note <= 88);
+        // The LFO stays within the search's rates. A vibrato is audible (5 to
+        // 80 cents), and its note long enough to hear a few cycles.
+        const auto target = static_cast<dsp::LfoTarget>(static_cast<int>(sound.params[param::Lfo1Target]));
+        if (target != dsp::LfoTarget::Off) {
+            CHECK(sound.params[param::Lfo1RateHz] >= 0.5f && sound.params[param::Lfo1RateHz] <= 15.0f);
+        }
+        if (target == dsp::LfoTarget::Pitch) {
+            ++vibratos;
+            const double cents = 1200.0 * sound.params[param::Lfo1Depth] * sound.params[param::Lfo1Depth];
+            CHECK(cents >= 4.99 && cents <= 80.01);
+            CHECK(sound.note.durationSec >= 0.7);
+        }
     }
+    CHECK(vibratos > 15 && vibratos < 60);
     CHECK(randomSound(space, 3).params != randomSound(space, 4).params);
+
+    // Six measurements of vibrato and tremolo come last.
+    CHECK(encoderFeatureCount() == 631);
+    const auto vibratoNote = renderNotes(withLfo(heldSaw(), dsp::LfoTarget::Pitch, 5.5, vibratoDepth(27.0)),
+                                         {{0.0, 1.5, 57, 1.0f}}, 0.3, 24000.0);
+    const auto plainNote = renderNotes(heldSaw(), {{0.0, 1.5, 57, 1.0f}}, 0.3, 24000.0);
+    const NoteEvent note{0.0, 1.5, 57, 1.0f};
+    const auto vib = encoderFeatures(toMono(vibratoNote.left, vibratoNote.right), 24000.0, note);
+    const auto steady = encoderFeatures(toMono(plainNote.left, plainNote.right), 24000.0, note);
+    const std::size_t m = encoderFeatureCount() - 6;
+    CHECK_NEAR(vib[m + 1], 27.0 / 50.0, 0.06); // depth in cents / 50
+    CHECK(vib[m + 2] > 0.7f);                  // a steady wobble
+    CHECK(steady[m + 1] < 0.05f);
+    for (const float v : vib)
+        CHECK(v >= 0.0f && v <= 1.0f);
 
     // Silence in gives all zeros rather than garbage.
     const std::vector<float> silence(24000, 0.0f);
@@ -576,7 +934,10 @@ void testTrainingAndModelFile()
     CHECK(result.report.dimScore.size() == SearchSpace::standard().dims.size());
     CHECK(lines.size() >= 8);
 
-    const auto path = std::filesystem::temp_directory_path() / "synthmatch_test_model.smm";
+    // A name of its own, so test runs side by side don't share the file.
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("synthmatch_test_model_" +
+                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".smm");
     std::string error;
     CHECK(result.encoder.save(path, &error));
     const auto loaded = Encoder::load(path, &error);
@@ -644,6 +1005,29 @@ void testTrainingAndModelFile()
     CHECK(Encoder::fromMemory(bytes).has_value());
     CHECK(!Encoder::fromMemory(std::span(bytes).first(bytes.size() / 2), &error));
     CHECK(!error.empty());
+
+    // The file records each dimension's range: a model trained for another
+    // LFO rate range is refused rather than used with the wrong scale.
+    {
+        std::size_t at = 16; // magic, version, feature count, dimension count
+        std::size_t rateLo = 0;
+        for (const auto& dim : space.dims) {
+            at += 4 + spec(dim.param).id.size() + 4; // the id, then the number of choices
+            if (dim.param == param::Lfo1RateHz)
+                rateLo = at;
+            at += 4 + 4 + 4; // lo, hi, extended
+        }
+        CHECK(rateLo > 0);
+        auto changed = bytes;
+        float lo = 0.0f;
+        std::memcpy(&lo, changed.data() + rateLo, sizeof lo);
+        CHECK(lo == 0.5f);
+        lo = 0.05f;
+        std::memcpy(changed.data() + rateLo, &lo, sizeof lo);
+        error.clear();
+        CHECK(!Encoder::fromMemory(changed, &error));
+        CHECK(error.find("Train it again") != std::string::npos);
+    }
     bytes[0] = 'X';
     CHECK(!Encoder::fromMemory(bytes, &error));
     std::filesystem::remove(path);
@@ -658,11 +1042,17 @@ int main()
     testSpectrogram();
     testDecimate();
     testPitchAndNotes();
+    testModulation();
+    testModulationDistance();
+    testMoveKey();
+    testSimplify();
     testMatchEqFit();
     testEigen();
     testCmaEs();
     testSearchSpace();
     testMatchRecoversSound();
+    testMatchMovesKey();
+    testMatchFindsVibrato();
     testMatchEqHelps();
     testMatchRejectsBadInput();
     testEncoderFeatures();
