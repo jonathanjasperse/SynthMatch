@@ -461,11 +461,17 @@ RandomSound randomSound(const SearchSpace& space, std::uint32_t seed)
     set(param::DelayMix, rng.range(0.05, 0.5));
     set(param::DelayHighCutHz, rng.logRange(1000.0, 20000.0));
 
-    set(param::ReverbOn, rng.chance(0.3) ? 1.0 : 0.0);
+    set(param::ReverbOn, rng.chance(0.4) ? 1.0 : 0.0);
     set(param::ReverbMix, rng.range(0.05, 0.6));
     set(param::ReverbSize, rng.uniform());
     set(param::ReverbDecaySec, rng.logRange(0.3, 8.0));
     set(param::ReverbDamping, rng.uniform());
+    // Room, chamber, hall, plate, vintage. The wobble, pre-delay and high cut
+    // aren't searched, but vary so the encoder doesn't depend on them.
+    set(param::ReverbMode, static_cast<double>(rng.pick({0.2, 0.15, 0.3, 0.25, 0.1})));
+    set(param::ReverbModDepth, rng.range(0.0, 0.7));
+    set(param::ReverbPredelayMs, rng.range(0.0, 60.0));
+    set(param::ReverbHighCutHz, rng.chance(0.5) ? 20000.0 : rng.logRange(5000.0, 20000.0));
 
     // The note: anywhere from a low bass to a high lead, held for a short or long time.
     sound.note.startSec = 0.0;

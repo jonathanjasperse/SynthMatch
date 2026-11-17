@@ -52,10 +52,11 @@ public:
         reset();
     }
 
+    // Cheap enough for the audio thread: the lines (megabytes at high sample
+    // rates) aren't cleared. Samples written before the reset read as silence.
     void reset()
     {
-        for (auto& b : buffer_)
-            std::fill(b.begin(), b.end(), 0.0f);
+        written_ = 0;
         write_ = 0;
         modPhase_ = 0.0;
         lowState_[0] = lowState_[1] = highState_[0] = highState_[1] = 0.0;
@@ -122,6 +123,8 @@ public:
                 buffer_[1][write_] = static_cast<float>(inR + feedback_ * wet[1]);
             }
             write_ = (write_ + 1) & mask_;
+            if (written_ <= mask_)
+                ++written_;
 
             left[i] = static_cast<float>(dry_ * inL + wet_ * wet[0]);
             right[i] = static_cast<float>(dry_ * inR + wet_ * wet[1]);
@@ -140,10 +143,14 @@ private:
         const auto index = static_cast<std::size_t>(static_cast<long long>(base)) & mask_;
 
         const auto& b = buffer_[static_cast<std::size_t>(channel)];
-        const double x0 = b[(index - 1) & mask_];
-        const double x1 = b[index];
-        const double x2 = b[(index + 1) & mask_];
-        const double x3 = b[(index + 2) & mask_];
+        // How long ago x1 was written (1 = the newest sample). Anything written
+        // before the last reset is silence.
+        const auto age = static_cast<std::size_t>(static_cast<long long>(write_) - static_cast<long long>(base));
+        const auto at = [&](std::size_t i, std::size_t sampleAge) { return sampleAge <= written_ ? b[i & mask_] : 0.0f; };
+        const double x0 = at(index - 1, age + 1);
+        const double x1 = at(index, age);
+        const double x2 = at(index + 1, age - 1);
+        const double x3 = at(index + 2, age - 2);
 
         const double c1 = 0.5 * (x2 - x0);
         const double c2 = x0 - 2.5 * x1 + 2.0 * x2 - 0.5 * x3;
@@ -156,6 +163,7 @@ private:
     std::vector<float> buffer_[2];
     std::size_t mask_ = 0;
     std::size_t write_ = 0;
+    std::size_t written_ = 0; // samples written since the last reset, up to the buffer size
 
     double target_[2] = {0.0, 0.0};  // delay length in samples
     double current_[2] = {0.0, 0.0}; // gliding towards target_

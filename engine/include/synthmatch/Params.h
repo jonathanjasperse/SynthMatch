@@ -120,6 +120,14 @@ enum Index : int {
 
     MatchEqAmount,
 
+    ReverbMode,
+    ReverbModDepth,
+    ReverbModRateHz,
+    ReverbDiffusion,
+    ReverbBassMult,
+    ReverbLowCutHz,
+    ReverbHighCutHz,
+
     Count
 };
 

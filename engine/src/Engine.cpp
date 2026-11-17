@@ -58,6 +58,9 @@ void Engine::reset()
     delay_.reset();
     reverb_.reset();
     matchEq_.reset();
+    eqFade_ = eqOn_ ? 1.0 : 0.0;
+    delayFade_ = delayOn_ ? 1.0 : 0.0;
+    reverbFade_ = reverbOn_ ? 1.0 : 0.0;
     running_ = false;
 }
 
@@ -170,9 +173,11 @@ void Engine::updateEffects()
 {
     const auto p = [this](int index) { return static_cast<double>(params_[static_cast<std::size_t>(index)]); };
 
-    // An effect that has just been switched on starts with empty buffers.
+    // An effect switched on after it had faded out completely starts with
+    // empty buffers. (Each is reset after its settings are set, so that it
+    // starts at its new delay times rather than gliding to them.)
     const bool eqOn = p(param::EqOn) >= 0.5;
-    if (eqOn && !eqOn_)
+    if (eqOn && !eqOn_ && eqFade_ == 0.0)
         eq_.reset();
     eqOn_ = eqOn;
 
@@ -189,11 +194,6 @@ void Engine::updateEffects()
     eq.highGainDb = p(param::EqHighGainDb);
     eq_.set(sampleRate_, eq);
 
-    const bool delayOn = p(param::DelayOn) >= 0.5;
-    if (delayOn && !delayOn_)
-        delay_.reset();
-    delayOn_ = delayOn;
-
     dsp::StereoDelay::Settings delay;
     const auto sync = static_cast<std::size_t>(p(param::DelaySync));
     delay.timeSec = sync > 0 && sync < kDelaySyncBeats.size() ? kDelaySyncBeats[sync] * 60.0 / tempoBpm_
@@ -209,22 +209,45 @@ void Engine::updateEffects()
     // Before any audio has run (loading a preset, offline rendering) the delay
     // time is set directly. While playing, it glides to avoid a click.
     delay_.set(delay, !running_);
+    const bool delayOn = p(param::DelayOn) >= 0.5;
+    if (delayOn && !delayOn_ && delayFade_ == 0.0)
+        delay_.reset();
+    delayOn_ = delayOn;
 
-    const bool reverbOn = p(param::ReverbOn) >= 0.5;
-    if (reverbOn && !reverbOn_)
-        reverb_.reset();
-    reverbOn_ = reverbOn;
-
+    // Size and pre-delay glide like the delay time. A new mode fades the tail
+    // out and starts afresh (see dsp/Reverb.h).
     dsp::Reverb::Settings reverb;
+    const int mode = static_cast<int>(p(param::ReverbMode));
+    reverb.mode = mode >= 0 && mode < static_cast<int>(dsp::ReverbMode::Count) ? static_cast<dsp::ReverbMode>(mode)
+                                                                                : dsp::ReverbMode::Hall;
     reverb.mix = p(param::ReverbMix);
     reverb.size = p(param::ReverbSize);
     reverb.decaySec = p(param::ReverbDecaySec);
     reverb.damping = p(param::ReverbDamping);
     reverb.predelaySec = p(param::ReverbPredelayMs) * 0.001;
     reverb.width = p(param::ReverbWidth);
-    reverb_.set(reverb);
+    reverb.modDepth = p(param::ReverbModDepth);
+    reverb.modRateHz = p(param::ReverbModRateHz);
+    reverb.diffusion = p(param::ReverbDiffusion);
+    reverb.bassMult = p(param::ReverbBassMult);
+    reverb.lowCutHz = p(param::ReverbLowCutHz);
+    reverb.highCutHz = p(param::ReverbHighCutHz);
+    reverb_.set(reverb, !running_);
+    const bool reverbOn = p(param::ReverbOn) >= 0.5;
+    if (reverbOn && !reverbOn_ && reverbFade_ == 0.0)
+        reverb_.reset();
+    reverbOn_ = reverbOn;
 
     matchEq_.set(sampleRate_, matchEqGains_, p(param::MatchEqAmount));
+
+    // Before any audio has run, effects are simply on or off. While playing,
+    // they fade over 10 ms.
+    effectFadeStep_ = 1.0 / (0.01 * sampleRate_);
+    if (!running_) {
+        eqFade_ = eqOn_ ? 1.0 : 0.0;
+        delayFade_ = delayOn_ ? 1.0 : 0.0;
+        reverbFade_ = reverbOn_ ? 1.0 : 0.0;
+    }
 }
 
 Engine::Voice& Engine::allocateVoice()
@@ -296,7 +319,46 @@ void Engine::allSoundOff()
     delay_.reset();
     reverb_.reset();
     matchEq_.reset();
+    // An effect that was fading out stops now.
+    eqFade_ = eqOn_ ? 1.0 : 0.0;
+    delayFade_ = delayOn_ ? 1.0 : 0.0;
+    reverbFade_ = reverbOn_ ? 1.0 : 0.0;
 }
+
+namespace {
+
+// Runs an effect in place. Just after it is switched on or off, its output
+// fades in or out against its input, a sample at a time; once faded out it
+// isn't run at all. `fade` is 1 when fully on.
+template <class Effect, std::size_t Chunk>
+void runEffect(Effect& effect, bool on, double& fade, double step, std::array<std::array<float, Chunk>, 2>& dry,
+               float* left, float* right, int numSamples)
+{
+    if (fade == (on ? 1.0 : 0.0)) {
+        if (on)
+            effect.process(left, right, numSamples);
+        return;
+    }
+    for (int start = 0; start < numSamples; start += static_cast<int>(Chunk)) {
+        if (!on && fade == 0.0)
+            return; // faded out: the rest stays dry
+        const int n = std::min(static_cast<int>(Chunk), numSamples - start);
+        float* l = left + start;
+        float* r = right + start;
+        std::copy_n(l, n, dry[0].begin());
+        std::copy_n(r, n, dry[1].begin());
+        effect.process(l, r, n);
+        for (int i = 0; i < n; ++i) {
+            fade = on ? std::min(1.0, fade + step) : std::max(0.0, fade - step);
+            const auto g = static_cast<float>(fade);
+            const auto k = static_cast<std::size_t>(i);
+            l[i] = dry[0][k] + g * (l[i] - dry[0][k]);
+            r[i] = dry[1][k] + g * (r[i] - dry[1][k]);
+        }
+    }
+}
+
+} // namespace
 
 void Engine::process(float* left, float* right, int numSamples)
 {
@@ -308,12 +370,9 @@ void Engine::process(float* left, float* right, int numSamples)
 
     renderVoices(left, right, numSamples);
 
-    if (eqOn_)
-        eq_.process(left, right, numSamples);
-    if (delayOn_)
-        delay_.process(left, right, numSamples);
-    if (reverbOn_)
-        reverb_.process(left, right, numSamples);
+    runEffect(eq_, eqOn_, eqFade_, effectFadeStep_, effectDry_, left, right, numSamples);
+    runEffect(delay_, delayOn_, delayFade_, effectFadeStep_, effectDry_, left, right, numSamples);
+    runEffect(reverb_, reverbOn_, reverbFade_, effectFadeStep_, effectDry_, left, right, numSamples);
     matchEq_.process(left, right, numSamples);
 
     running_ = true;

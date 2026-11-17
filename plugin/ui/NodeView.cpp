@@ -48,12 +48,14 @@ std::vector<NodeView::Node> NodeView::makeNodes()
         add(keys[k], titles[k], "A band-limited oscillator. Coarse and Fine tune it against the note being played.",
             {p::osc(k, p::OscWave), p::osc(k, p::OscCoarse), p::osc(k, p::OscFine), p::osc(k, p::OscPulseWidth),
              p::osc(k, p::OscLevel)},
-            p::osc(k, p::OscLevel), 20.0f, 16.0f + 68.0f * static_cast<float>(k), "mixer");
+            p::osc(k, p::OscLevel), 20.0f, 16.0f + 68.0f * static_cast<float>(k), "unison");
     }
     add("noise", "NOISE", "White noise, for breath, air and texture.", {p::NoiseLevel}, p::NoiseLevel, 20.0f, 220.0f, "mixer");
-    add("mixer", "MIXER", "Balances the sources, and stacks detuned unison copies of the oscillators across the stereo field.",
-        {p::Osc1Level, p::Osc2Level, p::Osc3Level, p::NoiseLevel, p::UnisonVoices, p::UnisonDetune, p::UnisonSpread}, -1,
-        178.0f, 118.0f, "filter");
+    // Unison copies only the oscillators; the noise goes straight to the mixer.
+    add("unison", "UNISON", "Stacks detuned copies of each oscillator across the stereo field. One voice is off.",
+        {p::UnisonVoices, p::UnisonDetune, p::UnisonSpread}, p::UnisonVoices, 178.0f, 36.0f, "mixer");
+    add("mixer", "MIXER", "Balances the sources.", {p::Osc1Level, p::Osc2Level, p::Osc3Level, p::NoiseLevel}, -1, 178.0f,
+        118.0f, "filter");
     add("filter", "FILTER", "Shapes the brightness. Its envelope opens and closes it on every note; key tracking follows the pitch.",
         {p::FilterType, p::FilterCutoffHz, p::FilterResonance, p::FilterKeyTrack, p::FilterEnvAmount, p::FilterAttackMs,
          p::FilterDecayMs, p::FilterSustain, p::FilterReleaseMs},
@@ -72,8 +74,11 @@ std::vector<NodeView::Node> NodeView::makeNodes()
         {p::DelayOn, p::DelayTimeMs, p::DelaySync, p::DelayFeedback, p::DelayMix, p::DelayMode, p::DelaySpread, p::DelayLowCutHz,
          p::DelayHighCutHz, p::DelayModRateHz, p::DelayModDepth},
         p::DelayOn, 652.0f, 84.0f, "reverb");
-    add("reverb", "REVERB", "Room and space.",
-        {p::ReverbOn, p::ReverbMix, p::ReverbSize, p::ReverbDecaySec, p::ReverbDamping, p::ReverbPredelayMs, p::ReverbWidth},
+    add("reverb", "REVERB",
+        "Room and space. The vintage mode is a dark, chorused old digital hall.",
+        {p::ReverbOn, p::ReverbMode, p::ReverbMix, p::ReverbSize, p::ReverbDecaySec, p::ReverbDamping, p::ReverbPredelayMs,
+         p::ReverbWidth, p::ReverbDiffusion, p::ReverbModDepth, p::ReverbModRateHz, p::ReverbBassMult, p::ReverbLowCutHz,
+         p::ReverbHighCutHz},
         p::ReverbOn, 652.0f, 152.0f, "matcheq");
     add("matcheq", "MATCH EQ", "The correction measured against the reference recording. Amount sets how much of it is applied.",
         {p::MatchEqAmount}, p::MatchEqAmount, 652.0f, 220.0f, "output");
@@ -189,11 +194,14 @@ private:
         return nullptr;
     }
 
+    // Off is the power parameter's lowest value: 0 for most, 1 voice for unison.
+    static float offValue(const Node& n) { return synthmatch::spec(n.power).min; }
+
     bool isOn(const Node& n) const
     {
         if (n.power < 0)
             return true;
-        return value(n.power) > 0.0f;
+        return value(n.power) > offValue(n);
     }
 
     juce::String modTarget(const Node& n) const
@@ -223,8 +231,9 @@ private:
     {
         auto& session = owner_.session_;
         const float now = value(n.power);
-        float next = 0.0f;
-        if (now > 0.0f) {
+        const float off = offValue(n);
+        float next = off;
+        if (now > off) {
             remembered_[n.power] = now;
         } else {
             const auto it = remembered_.find(n.power);
@@ -236,10 +245,12 @@ private:
                 next = 0.7f;
             else if (n.key == "noise")
                 next = 0.2f;
+            else if (n.key == "unison")
+                next = 3.0f; // as the assistant's "unison on"
             else
                 next = 1.0f;
         }
-        session.applyEdits({{n.power, synthmatch::assist::Edit::Op::Set, next}}, (next > 0.0f ? "turn on " : "turn off ") + n.title.toLowerCase());
+        session.applyEdits({{n.power, synthmatch::assist::Edit::Op::Set, next}}, (next > off ? "turn on " : "turn off ") + n.title.toLowerCase());
         repaint();
     }
 
@@ -366,9 +377,15 @@ private:
         }
         if (key == "noise")
             return text(p::NoiseLevel);
-        if (key == "mixer") {
+        if (key == "unison") {
             const int voices = static_cast<int>(value(p::UnisonVoices));
-            return voices > 1 ? juce::String(voices) + " voices" + dot + text(p::UnisonDetune) : juce::String("1 voice");
+            return voices > 1 ? juce::String(voices) + " voices" + dot + text(p::UnisonDetune) : juce::String("off");
+        }
+        if (key == "mixer") {
+            int sources = 0;
+            for (const int level : {p::Osc1Level, p::Osc2Level, p::Osc3Level, p::NoiseLevel})
+                sources += value(level) > 0.0f ? 1 : 0;
+            return juce::String(sources) + (sources == 1 ? " source" : " sources");
         }
         if (key == "filter")
             return text(p::FilterType) + dot + text(p::FilterCutoffHz);
@@ -394,7 +411,7 @@ private:
         if (key == "reverb") {
             if (value(p::ReverbOn) == 0.0f)
                 return "off";
-            return text(p::ReverbDecaySec) + dot + text(p::ReverbMix);
+            return text(p::ReverbMode) + dot + text(p::ReverbDecaySec) + dot + text(p::ReverbMix);
         }
         if (key == "matcheq") {
             bool any = false;
@@ -437,6 +454,17 @@ private:
                 default: v = std::sin(std::floor(ph * 4.0f + t * 7.0f) * 2.3f); break; // random steps
                 }
                 i == 0 ? path.startNewSubPath(x(t), y(v * 0.8f)) : path.lineTo(x(t), y(v * 0.8f));
+            }
+        } else if (n.key == "unison") {
+            // A few copies of a wave, each a little out of step.
+            const int copies = juce::jlimit(1, 3, static_cast<int>(value(p::UnisonVoices)));
+            for (int c = 0; c < copies; ++c) {
+                const float offset = 0.09f * static_cast<float>(c) - 0.045f * static_cast<float>(copies - 1);
+                for (int i = 0; i <= steps; ++i) {
+                    const float t = static_cast<float>(i) / steps;
+                    const float v = 0.75f * std::sin((t * 2.0f + offset) * juce::MathConstants<float>::twoPi);
+                    i == 0 ? path.startNewSubPath(x(t), y(v)) : path.lineTo(x(t), y(v));
+                }
             }
         } else if (n.key == "noise") {
             juce::Random random(3);
@@ -542,20 +570,29 @@ public:
     void resized() override
     {
         auto area = getLocalBounds().reduced(18, 12);
-        area.removeFromLeft(kTitleWidth);
+        area.removeFromLeft(titleWidth());
         if (controls_.empty())
             return;
-        const int each = std::min(84, area.getWidth() / static_cast<int>(controls_.size()));
+        // Drop-downs get at least 92 pixels, knobs share out the rest (at most
+        // 84 each), so a crowded node (the reverb) fits instead of running off the end.
+        int choices = 0;
+        for (const auto& c : controls_)
+            choices += dynamic_cast<theme::Choice*>(c.get()) != nullptr ? 1 : 0;
+        const int count = static_cast<int>(controls_.size());
+        const int width = area.getWidth();
+        const int wideWidth = 92;
+        const int knob = std::min(84, (width - choices * wideWidth) / std::max(1, count - choices));
         for (auto& c : controls_) {
             const bool wide = dynamic_cast<theme::Choice*>(c.get()) != nullptr;
-            c->setBounds(area.removeFromLeft(wide ? std::max(each, 92) : each).withSizeKeepingCentre(wide ? std::max(each, 92) - 8 : each, std::min(area.getHeight(), 92)));
+            const int w = wide ? wideWidth : knob;
+            c->setBounds(area.removeFromLeft(w).withSizeKeepingCentre(wide ? w - 8 : w, std::min(area.getHeight(), 92)));
         }
     }
 
     void paint(juce::Graphics& g) override
     {
         theme::drawPanel(g, getLocalBounds().toFloat(), 14.0f, 0.82f);
-        auto area = getLocalBounds().reduced(20, 16).removeFromLeft(kTitleWidth - 16);
+        auto area = getLocalBounds().reduced(20, 16).removeFromLeft(titleWidth() - 16);
         const juce::String title = node_ ? node_->title.substring(0, 1) + node_->title.substring(1).toLowerCase() : "Key controls";
         const juce::String about = node_ ? node_->about : "The settings you'll reach for most. Click a node to edit everything in it.";
         g.setFont(theme::light(22.0f));
@@ -568,6 +605,13 @@ public:
 
 private:
     static constexpr int kTitleWidth = 200;
+
+    // The title and its text narrow (down to 140 pixels) to make room for many controls.
+    int titleWidth() const
+    {
+        const int wanted = static_cast<int>(controls_.size()) * 64;
+        return juce::jlimit(140, kTitleWidth, getWidth() - 36 - wanted);
+    }
 
     static juce::String label(int index)
     {

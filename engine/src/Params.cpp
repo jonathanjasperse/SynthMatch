@@ -3,6 +3,7 @@
 #include "synthmatch/dsp/Filter.h"
 #include "synthmatch/dsp/Lfo.h"
 #include "synthmatch/dsp/Oscillator.h"
+#include "synthmatch/dsp/Reverb.h"
 
 #include <algorithm>
 #include <cmath>
@@ -41,6 +42,12 @@ constexpr std::array<std::string_view, 2> kDelayModeNames{"stereo", "pingpong"};
 constexpr std::array<std::string_view, 8> kDelaySyncNames{"off", "1/16", "1/8T", "1/8", "1/8D", "1/4", "1/4D", "1/2"};
 static_assert(kDelaySyncNames.size() == kDelaySyncBeats.size());
 constexpr float kLastDelaySync = static_cast<float>(kDelaySyncNames.size()) - 1.0f;
+
+// Same order as dsp::ReverbMode.
+constexpr std::array<std::string_view, 5> kReverbModeNames{"room", "chamber", "hall", "plate", "vintage"};
+static_assert(kReverbModeNames.size() == static_cast<std::size_t>(dsp::ReverbMode::Count));
+constexpr float kLastReverbMode = static_cast<float>(dsp::ReverbMode::Count) - 1.0f;
+constexpr float kHall = static_cast<float>(dsp::ReverbMode::Hall);
 
 // Same order as param::Index. Never reorder or reuse ids: saved presets and
 // trained models refer to parameters by id.
@@ -85,9 +92,10 @@ constexpr std::array<ParamSpec, kNumParams> kSchema{{
     {"filter_release_ms", "Filter Release", 1.0f, 10000.0f, 200.0f, Curve::Log, "ms"},
 
     // Unison: each oscillator becomes several copies, detuned across
-    // +/- unison_detune cents and panned across the stereo field.
+    // +/- unison_detune cents and panned across the stereo field. At the most
+    // detune the outer copies are a semitone apart.
     {"unison_voices", "Unison Voices", 1.0f, static_cast<float>(kMaxUnison), 1.0f, Curve::Stepped, ""},
-    {"unison_detune", "Unison Detune", 0.0f, 100.0f, 15.0f, Curve::Linear, "cents"},
+    {"unison_detune", "Unison Detune", 0.0f, 50.0f, 10.0f, Curve::Linear, "cents"},
     {"unison_spread", "Unison Spread", 0.0f, 1.0f, 0.5f, Curve::Linear, ""},
 
     // LFOs. See dsp/Lfo.h for what depth means for each target.
@@ -130,17 +138,30 @@ constexpr std::array<ParamSpec, kNumParams> kSchema{{
     {"delay_mod_rate_hz", "Delay Mod Rate", 0.05f, 10.0f, 0.5f, Curve::Log, "Hz"},
     {"delay_mod_depth", "Delay Mod Depth", 0.0f, 1.0f, 0.0f, Curve::Linear, ""},
 
-    {"reverb_on", "Reverb", 0.0f, 1.0f, 0.0f, Curve::Stepped, "", kOffOn},
-    {"reverb_mix", "Reverb Mix", 0.0f, 1.0f, 0.25f, Curve::Linear, ""},
+    // A touch of reverb is on by default (mix 0.15 is about 14 dB below the dry sound).
+    {"reverb_on", "Reverb", 0.0f, 1.0f, 1.0f, Curve::Stepped, "", kOffOn},
+    {"reverb_mix", "Reverb Mix", 0.0f, 1.0f, 0.15f, Curve::Linear, ""},
     {"reverb_size", "Reverb Size", 0.0f, 1.0f, 0.5f, Curve::Linear, ""},
-    {"reverb_decay_s", "Reverb Decay", 0.1f, 20.0f, 2.0f, Curve::Log, "s"},
+    {"reverb_decay_s", "Reverb Decay", 0.1f, 20.0f, 1.8f, Curve::Log, "s"},
     {"reverb_damping", "Reverb Damping", 0.0f, 1.0f, 0.4f, Curve::Linear, ""},
-    {"reverb_predelay_ms", "Reverb Pre-delay", 0.0f, 200.0f, 10.0f, Curve::Linear, "ms"},
+    {"reverb_predelay_ms", "Reverb Pre-delay", 0.0f, 200.0f, 20.0f, Curve::Linear, "ms"},
     {"reverb_width", "Reverb Width", 0.0f, 1.0f, 1.0f, Curve::Linear, ""},
 
     // How much of the match EQ curve to apply. The curve itself is stored in
     // the preset, not as parameters: see Preset.h.
     {"matcheq_amount", "Match EQ Amount", 0.0f, 1.0f, 1.0f, Curve::Linear, ""},
+
+    // More of the reverb (see dsp/Reverb.h). The mode sets its structure. Mod
+    // depth 1 wobbles the lines by about 1 ms (2.4 ms in vintage). Bass decay
+    // is the bass's decay time as a multiple of the decay. The cuts shape what
+    // goes into the reverb.
+    {"reverb_mode", "Reverb Mode", 0.0f, kLastReverbMode, kHall, Curve::Stepped, "", kReverbModeNames},
+    {"reverb_mod_depth", "Reverb Mod Depth", 0.0f, 1.0f, 0.35f, Curve::Linear, ""},
+    {"reverb_mod_rate_hz", "Reverb Mod Rate", 0.05f, 5.0f, 0.5f, Curve::Log, "Hz"},
+    {"reverb_diffusion", "Reverb Diffusion", 0.0f, 1.0f, 0.75f, Curve::Linear, ""},
+    {"reverb_bass_mult", "Reverb Bass Decay", 0.5f, 2.0f, 1.0f, Curve::Log, "x"},
+    {"reverb_lowcut_hz", "Reverb Low Cut", 20.0f, 1000.0f, 20.0f, Curve::Log, "Hz"},
+    {"reverb_highcut_hz", "Reverb High Cut", 1000.0f, 20000.0f, 20000.0f, Curve::Log, "Hz"},
 }};
 
 // Node prefixes, in the order the node view lays them out.
