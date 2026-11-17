@@ -18,7 +18,7 @@ namespace ui {
 // A pill button with a small drawn icon.
 class IconButton : public juce::Button {
 public:
-    enum class Icon { None, Play, Stop, Plus, Refresh, Open, Save, Back, Nodes, Info };
+    enum class Icon { None, Play, Stop, Plus, Refresh, Open, Save, Back, Nodes, Info, Close };
 
     IconButton(const juce::String& text, Icon icon);
     void setIcon(Icon icon) { icon_ = icon; repaint(); }
@@ -64,6 +64,7 @@ private:
     IconButton stop_{"Stop", IconButton::Icon::Stop};
     IconButton choose_{"Choose a file", IconButton::Icon::Plus};
     IconButton replace_{"Replace", IconButton::Icon::Plus};
+    IconButton clear_{"Clear", IconButton::Icon::Close};
     IconButton octaveDown_{juce::String::fromUTF8("Octave \xe2\x88\x92"), IconButton::Icon::None};
     IconButton octaveUp_{"Octave +", IconButton::Icon::None};
 };

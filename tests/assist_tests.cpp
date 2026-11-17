@@ -189,6 +189,18 @@ void testRulesVocabulary()
     CHECK(v(vibrato, param::Lfo1Target) == static_cast<float>(dsp::LfoTarget::Pitch));
     CHECK(v(vibrato, param::Lfo1Depth) > 0.0f);
     CHECK(v(after("faster vibrato", vibrato), param::Lfo1RateHz) > v(vibrato, param::Lfo1RateHz));
+    // A slow square pitch LFO isn't a vibrato: asking for vibrato replaces it with one.
+    {
+        auto trick = p;
+        trick[param::Lfo1Target] = static_cast<float>(dsp::LfoTarget::Pitch);
+        trick[param::Lfo1Wave] = static_cast<float>(dsp::LfoWave::Square);
+        trick[param::Lfo1RateHz] = 0.8f;
+        trick[param::Lfo1Depth] = 0.4f;
+        const auto fixed = after("add some vibrato", trick);
+        CHECK(v(fixed, param::Lfo1Wave) == static_cast<float>(dsp::LfoWave::Sine));
+        CHECK_NEAR(v(fixed, param::Lfo1RateHz), 5.5, 1e-6);
+        CHECK_NEAR(v(fixed, param::Lfo1Depth), 0.12, 1e-6);
+    }
     CHECK(v(after("add a wobble", p), param::Lfo1Target) == static_cast<float>(dsp::LfoTarget::Cutoff));
     CHECK(v(after("a slow wobble", p), param::Lfo1RateHz) < v(after("add a wobble", p), param::Lfo1RateHz));
     CHECK(v(after("fast vibrato", p), param::Lfo1RateHz) > v(after("add vibrato", p), param::Lfo1RateHz));

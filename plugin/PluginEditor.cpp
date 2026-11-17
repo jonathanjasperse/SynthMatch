@@ -349,6 +349,12 @@ void SynthMatchEditor::runSnapshotStep()
         break;
     case 6:
         shoot("5-nodes-delay");
+        showNodes(false);
+        session_.clearReference();
+        snapshotStep_ = 7;
+        break;
+    case 7:
+        shoot("6-cleared");
         stopTimer();
         if (juce::JUCEApplicationBase::isStandaloneApp())
             juce::JUCEApplicationBase::quit();

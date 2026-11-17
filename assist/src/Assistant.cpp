@@ -682,7 +682,15 @@ std::string applyWord(Word word, int sign, double amount, const std::string& cla
         const auto target = word == Word::Vibrato ? dsp::LfoTarget::Pitch
                                                   : (word == Word::Wobble ? dsp::LfoTarget::Cutoff : dsp::LfoTarget::Amp);
         const char* name = word == Word::Vibrato ? "vibrato" : (word == Word::Wobble ? "filter wobble" : "tremolo");
-        const bool already = b.value(param::Lfo1Target) == static_cast<float>(target);
+        bool already = b.value(param::Lfo1Target) == static_cast<float>(target);
+        if (already && word == Word::Vibrato) {
+            // A pitch LFO is only a vibrato if it's smooth and quick enough. A
+            // slow square one (a match can use that to shift the pitch) is
+            // replaced by a real vibrato rather than made deeper.
+            const auto wave = static_cast<dsp::LfoWave>(static_cast<int>(b.value(param::Lfo1Wave)));
+            const float rate = b.value(param::Lfo1RateHz);
+            already = (wave == dsp::LfoWave::Sine || wave == dsp::LfoWave::Triangle) && rate >= 3.0f && rate <= 9.0f;
+        }
         if (hasAny(clause, {"faster", "quicker", "speed up"})) {
             b.nudge(param::Lfo1RateHz, 0.1 * amount);
             return std::string("Faster ") + name + ".";

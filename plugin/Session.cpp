@@ -33,6 +33,35 @@ const char* noteName(int note)
 
 juce::String noteText(int note) { return juce::String(noteName(note)) + juce::String(note / 12 - 1); }
 
+// Retunes every oscillator `semitones` lower, so the same keys play that much
+// lower, with the filter's key tracking compensated so the tone doesn't
+// change. Leaves `params` alone and returns false if an audible oscillator or
+// the cutoff would go out of range.
+bool shiftKey(synthmatch::ParamValues& params, int semitones)
+{
+    namespace param = synthmatch::param;
+    auto shifted = params;
+    for (int k = 0; k < param::kNumOscs; ++k) {
+        const auto coarse = static_cast<std::size_t>(param::osc(k, param::OscCoarse));
+        const auto level = static_cast<std::size_t>(param::osc(k, param::OscLevel));
+        const float value = shifted[coarse] - static_cast<float>(semitones);
+        const auto& spec = synthmatch::spec(static_cast<int>(coarse));
+        if ((value < spec.min || value > spec.max) && shifted[level] > 0.0f)
+            return false;
+        shifted[coarse] = std::clamp(value, spec.min, spec.max);
+    }
+    const float track = shifted[param::FilterKeyTrack];
+    if (track > 0.0f) {
+        const float cutoff = shifted[param::FilterCutoffHz] * static_cast<float>(std::exp2(-track * semitones / 12.0));
+        const auto& spec = synthmatch::spec(param::FilterCutoffHz);
+        if (cutoff < spec.min || cutoff > spec.max)
+            return false;
+        shifted[param::FilterCutoffHz] = cutoff;
+    }
+    params = shifted;
+    return true;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------- background jobs
@@ -341,6 +370,20 @@ juce::String Session::matchStage() const { return matchJob_ ? juce::String(match
 
 double Session::liveDistance() const { return matchJob_ ? matchJob_->distance.load() : lastMatch_.distance; }
 
+void Session::clearReference()
+{
+    if (!hasReference())
+        return;
+    processor_.stopPlayback();
+    discardMatch();
+    reference_ = {};
+    processor_.setReference(nullptr);
+    lastMatch_ = {};
+    matchState_ = MatchState::Idle;
+    add(LogEntry::Kind::Info, "Cleared the recording. The sound you made stays; drop in another file to match again.");
+    sendChangeMessage();
+}
+
 bool Session::shiftOctave(int octaves)
 {
     if (!lastMatch_.valid || octaves == 0 || matchJob_)
@@ -356,7 +399,7 @@ bool Session::shiftOctave(int octaves)
         }
     }
     auto p = preset();
-    if (!match::moveKey(p.params, semitones)) {
+    if (!shiftKey(p.params, semitones)) {
         add(LogEntry::Kind::Error, "The oscillators can't be tuned any " + direction + ".");
         return false;
     }

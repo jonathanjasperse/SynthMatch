@@ -15,7 +15,15 @@ if(WIN32 AND SYNTHMATCH_INSTALL_PLUGIN)
     list(APPEND SYNTHMATCH_COPY_ARGS VST3_COPY_DIR "${SYNTHMATCH_VST3_DIR}")
 endif()
 
+# The app icon: the background tile (plugin/assets/tile.png) when there is one.
+# JUCE turns it into the Windows .ico and the macOS .icns.
+set(SYNTHMATCH_ICON_ARGS "")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/tile.png")
+    set(SYNTHMATCH_ICON_ARGS ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/tile.png")
+endif()
+
 juce_add_plugin(SynthMatch
+    ${SYNTHMATCH_ICON_ARGS}
     PRODUCT_NAME "SynthMatch"
     COMPANY_NAME "Jonathan Jasperse"
     BUNDLE_ID "com.jonathanjasperse.synthmatch"

@@ -62,6 +62,10 @@ void IconButton::drawIcon(juce::Graphics& g, Icon icon, juce::Rectangle<float> a
         g.drawLine(c.x - s * 0.36f, c.y, c.x + s * 0.36f, c.y, 1.6f);
         g.drawLine(c.x, c.y - s * 0.36f, c.x, c.y + s * 0.36f, 1.6f);
         break;
+    case Icon::Close:
+        g.drawLine(c.x - s * 0.27f, c.y - s * 0.27f, c.x + s * 0.27f, c.y + s * 0.27f, 1.6f);
+        g.drawLine(c.x - s * 0.27f, c.y + s * 0.27f, c.x + s * 0.27f, c.y - s * 0.27f, 1.6f);
+        break;
     case Icon::Refresh:
         p.addCentredArc(c.x, c.y, s * 0.32f, s * 0.32f, 0.0f, 0.6f, 5.6f, true);
         g.strokePath(p, stroke);
@@ -140,8 +144,10 @@ void IconButton::paintButton(juce::Graphics& g, bool highlighted, bool down)
 
 MainView::MainView(SynthMatchProcessor& processor, Session& session) : processor_(processor), session_(session)
 {
-    for (auto* b : {&playReference_, &playSynth_, &matchAgain_, &stop_, &choose_, &replace_, &octaveDown_, &octaveUp_})
+    for (auto* b : {&playReference_, &playSynth_, &matchAgain_, &stop_, &choose_, &replace_, &clear_, &octaveDown_, &octaveUp_})
         addAndMakeVisible(*b);
+    clear_.onClick = [this] { session_.clearReference(); };
+    clear_.setTooltip("Remove the recording (the sound you have stays)");
     octaveDown_.onClick = [this] { session_.shiftOctave(-1); };
     octaveUp_.onClick = [this] { session_.shiftOctave(1); };
     octaveDown_.setTooltip("MIDI sounds too high? Play the preset an octave lower from the same keys");
@@ -199,6 +205,7 @@ void MainView::updateButtons()
     const bool running = session_.matchState() == Session::MatchState::Running;
     choose_.setVisible(!has);
     replace_.setVisible(has);
+    clear_.setVisible(has);
     const bool matched = has && !running && session_.lastMatch().valid;
     octaveDown_.setVisible(matched);
     octaveUp_.setVisible(matched);
@@ -235,6 +242,8 @@ void MainView::resized()
     const auto inner = leftCard_.toNearestInt().reduced(22, 18);
     const int replaceWidth = replace_.idealWidth();
     replace_.setBounds(juce::Rectangle<int>(replaceWidth, 28).withCentre({inner.getRight() - replaceWidth / 2, inner.getY() + 22 + 16}));
+    const int clearWidth = clear_.idealWidth();
+    clear_.setBounds(replace_.getBounds().withWidth(clearWidth).translated(-(clearWidth + 6), 0));
 
     // Under the score card's notes line (see paintScore: header 22, score 84, notes 20).
     auto octaveRow = rightCard_.toNearestInt().reduced(22, 18).withTrimmedTop(22 + 84 + 20 + 2).withHeight(26);
@@ -311,7 +320,7 @@ void MainView::paintReference(juce::Graphics& g, juce::Rectangle<float> card)
     g.setFont(theme::light(22.0f));
     g.setColour(theme::colour::textHi);
     auto nameRow = area.removeFromTop(32.0f);
-    nameRow.removeFromRight(static_cast<float>(replace_.getWidth() + 12)); // the Replace button
+    nameRow.removeFromRight(static_cast<float>(replace_.getWidth() + clear_.getWidth() + 18)); // the Clear and Replace buttons
     g.drawText(ref.file.getFileNameWithoutExtension(), nameRow, juce::Justification::centredLeft, true);
     area.removeFromTop(10.0f);
 

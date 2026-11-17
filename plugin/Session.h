@@ -59,6 +59,8 @@ public:
     juce::String audioFileWildcard() const { return formats_.getWildcardForAllFormats(); }
     bool loadReference(const juce::File& file, juce::String& error, bool startMatching = true);
     bool hasReference() const { return reference_.audio != nullptr; }
+    // Removes the recording and its match; the current sound stays.
+    void clearReference();
     const Reference& reference() const { return reference_; }
 
     // ---- Matching
