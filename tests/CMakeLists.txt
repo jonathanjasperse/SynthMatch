@@ -32,3 +32,11 @@ add_test(NAME match COMMAND synthmatch_match_tests)
 add_executable(synthmatch_assist_tests assist_tests.cpp)
 target_link_libraries(synthmatch_assist_tests PRIVATE synthmatch::assist)
 add_test(NAME assist COMMAND synthmatch_assist_tests)
+
+# The plugin's real-time tools: the triple buffer, the output limiter and the
+# reference resampler. They are plain C++, so they are tested without JUCE.
+add_executable(synthmatch_plugin_tests plugin_tests.cpp)
+target_include_directories(synthmatch_plugin_tests PRIVATE ${PROJECT_SOURCE_DIR}/plugin)
+find_package(Threads REQUIRED)
+target_link_libraries(synthmatch_plugin_tests PRIVATE Threads::Threads)
+add_test(NAME plugin_realtime COMMAND synthmatch_plugin_tests)
