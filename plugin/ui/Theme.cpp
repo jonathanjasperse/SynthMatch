@@ -318,6 +318,71 @@ void MetalLookAndFeel::drawTooltip(juce::Graphics& g, const juce::String& text, 
 
 // ---------------------------------------------------------------- controls
 
+ParamBinding::ParamBinding(juce::RangedAudioParameter& parameter, std::function<void(float)> show)
+    : parameter_(parameter), show_(std::move(show))
+{
+    timerCallback();
+    startTimerHz(30);
+}
+
+ParamBinding::~ParamBinding()
+{
+    stopTimer();
+    endGesture();
+}
+
+void ParamBinding::beginGesture()
+{
+    if (inGesture_)
+        return;
+    inGesture_ = true;
+    parameter_.beginChangeGesture();
+}
+
+void ParamBinding::endGesture()
+{
+    if (!inGesture_)
+        return;
+    inGesture_ = false;
+    parameter_.endChangeGesture();
+}
+
+void ParamBinding::set(float value)
+{
+    const float normalised = parameter_.convertTo0to1(value);
+    if (!juce::approximatelyEqual(parameter_.getValue(), normalised)) {
+        if (inGesture_) {
+            parameter_.setValueNotifyingHost(normalised);
+        } else {
+            parameter_.beginChangeGesture();
+            parameter_.setValueNotifyingHost(normalised);
+            parameter_.endChangeGesture();
+        }
+    }
+    shown_ = parameter_.getValue(); // the control already shows it
+}
+
+void ParamBinding::setAsGesture(float value)
+{
+    const bool open = inGesture_;
+    beginGesture();
+    set(value);
+    if (!open)
+        endGesture();
+}
+
+void ParamBinding::timerCallback()
+{
+    // While the person is moving the control, it shows what they set.
+    if (inGesture_)
+        return;
+    const float value = parameter_.getValue(); // an atomic read
+    if (value != shown_) {
+        shown_ = value;
+        show_(parameter_.convertFrom0to1(value));
+    }
+}
+
 Knob::Knob(juce::RangedAudioParameter& parameter, int paramIndex, const juce::String& label)
     : index_(paramIndex), label_(label.isNotEmpty() ? label : parameter.getName(40))
 {
@@ -329,9 +394,51 @@ Knob::Knob(juce::RangedAudioParameter& parameter, int paramIndex, const juce::St
         slider_.getProperties().set("bipolar", true);
     slider_.setPopupDisplayEnabled(false, false, nullptr);
     addAndMakeVisible(slider_);
-    attachment_ = std::make_unique<juce::SliderParameterAttachment>(parameter, slider_);
-    slider_.onValueChange = [this] { repaint(); };
+
+    // The parameter's own range, set up the way JUCE's SliderParameterAttachment
+    // does it, so a knob position means the same as the host's 0..1.
+    auto range = parameter.getNormalisableRange();
+    juce::NormalisableRange<double> sliderRange(
+        range.start, range.end,
+        [range](double start, double end, double t) mutable {
+            range.start = static_cast<float>(start);
+            range.end = static_cast<float>(end);
+            return static_cast<double>(range.convertFrom0to1(static_cast<float>(t)));
+        },
+        [range](double start, double end, double v) mutable {
+            range.start = static_cast<float>(start);
+            range.end = static_cast<float>(end);
+            return static_cast<double>(range.convertTo0to1(static_cast<float>(v)));
+        },
+        [range](double start, double end, double v) mutable {
+            range.start = static_cast<float>(start);
+            range.end = static_cast<float>(end);
+            return static_cast<double>(range.snapToLegalValue(static_cast<float>(v)));
+        });
+    sliderRange.interval = range.interval;
+    sliderRange.skew = range.skew;
+    sliderRange.symmetricSkew = range.symmetricSkew;
+    slider_.setNormalisableRange(sliderRange);
     slider_.setDoubleClickReturnValue(true, parameter.convertFrom0to1(parameter.getDefaultValue()));
+    // The parameter's own text (for screen readers), as the attachment gave it.
+    auto* p = &parameter;
+    slider_.textFromValueFunction = [p](double value) { return p->getText(p->convertTo0to1(static_cast<float>(value)), 0); };
+    slider_.valueFromTextFunction = [p](const juce::String& text) {
+        return static_cast<double>(p->convertFrom0to1(p->getValueForText(text)));
+    };
+
+    binding_ = std::make_unique<ParamBinding>(parameter, [this](float value) {
+        slider_.setValue(value, juce::dontSendNotification);
+        repaint();
+    });
+    // Drags, the double-click reset and the mouse wheel all come wrapped in
+    // drag start and end, which become the host's change gesture.
+    slider_.onDragStart = [this] { binding_->beginGesture(); };
+    slider_.onValueChange = [this] {
+        binding_->set(static_cast<float>(slider_.getValue()));
+        repaint();
+    };
+    slider_.onDragEnd = [this] { binding_->endGesture(); };
 }
 
 void Knob::resized()
@@ -360,7 +467,21 @@ Choice::Choice(juce::RangedAudioParameter& parameter, int paramIndex, const juce
     for (std::size_t i = 0; i < s.choices.size(); ++i)
         box_.addItem(juce::String::fromUTF8(std::string(s.choices[i]).c_str()), static_cast<int>(i) + 1);
     addAndMakeVisible(box_);
-    attachment_ = std::make_unique<juce::ComboBoxParameterAttachment>(parameter, box_);
+
+    // Item i is at i / (items - 1) on the host's 0..1 scale, as with JUCE's
+    // ComboBoxParameterAttachment.
+    auto* p = &parameter;
+    binding_ = std::make_unique<ParamBinding>(parameter, [this, p](float value) {
+        const int index = juce::roundToInt(p->convertTo0to1(value) * static_cast<float>(box_.getNumItems() - 1));
+        if (index != box_.getSelectedItemIndex())
+            box_.setSelectedItemIndex(index, juce::dontSendNotification);
+    });
+    box_.onChange = [this, p] {
+        const int items = box_.getNumItems();
+        const float normalised =
+            items > 1 ? static_cast<float>(box_.getSelectedItemIndex()) / static_cast<float>(items - 1) : 0.0f;
+        binding_->setAsGesture(p->convertFrom0to1(normalised));
+    };
 }
 
 void Choice::resized()
@@ -381,7 +502,9 @@ Switch::Switch(juce::RangedAudioParameter& parameter, const juce::String& label)
     : label_(label.isNotEmpty() ? label : parameter.getName(40))
 {
     addAndMakeVisible(button_);
-    attachment_ = std::make_unique<juce::ButtonParameterAttachment>(parameter, button_);
+    binding_ = std::make_unique<ParamBinding>(
+        parameter, [this](float value) { button_.setToggleState(value >= 0.5f, juce::dontSendNotification); });
+    button_.onClick = [this] { binding_->setAsGesture(button_.getToggleState() ? 1.0f : 0.0f); };
 }
 
 void Switch::resized()

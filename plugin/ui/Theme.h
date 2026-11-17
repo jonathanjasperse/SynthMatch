@@ -5,6 +5,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <functional>
 #include <memory>
 
 namespace theme {
@@ -70,6 +71,32 @@ public:
     void drawTooltip(juce::Graphics&, const juce::String& text, int width, int height) override;
 };
 
+// Connects a control to a parameter without listening to it. JUCE's attachments
+// listen, so when the host automates a parameter on the audio thread they post
+// a message from there. This reads the value on the message thread instead, 30
+// times a second, and writes through the parameter with change gestures so the
+// host records edits and can undo them.
+class ParamBinding : private juce::Timer {
+public:
+    // `show` puts a new value (in the parameter's own units) on the control. It
+    // runs on the message thread, now and whenever the value changes elsewhere.
+    ParamBinding(juce::RangedAudioParameter& parameter, std::function<void(float)> show);
+    ~ParamBinding() override;
+
+    void beginGesture();
+    void set(float value); // inside a gesture, or as one whole gesture if none is open
+    void endGesture();
+    void setAsGesture(float value);
+
+private:
+    void timerCallback() override;
+
+    juce::RangedAudioParameter& parameter_;
+    std::function<void(float)> show_;
+    float shown_ = -1.0f; // the 0..1 value the control shows
+    bool inGesture_ = false;
+};
+
 // A rotary knob bound to one synth parameter, with its name and value below.
 class Knob : public juce::Component {
 public:
@@ -83,8 +110,8 @@ public:
 private:
     int index_;
     juce::String label_;
+    std::unique_ptr<ParamBinding> binding_; // before the control, so it outlives the control's callbacks
     juce::Slider slider_;
-    std::unique_ptr<juce::SliderParameterAttachment> attachment_;
 };
 
 // A choice parameter as a drop-down, with its name above.
@@ -96,8 +123,8 @@ public:
 
 private:
     juce::String label_;
+    std::unique_ptr<ParamBinding> binding_;
     juce::ComboBox box_;
-    std::unique_ptr<juce::ComboBoxParameterAttachment> attachment_;
 };
 
 // An on/off parameter as a small lit switch.
@@ -109,8 +136,8 @@ public:
 
 private:
     juce::String label_;
+    std::unique_ptr<ParamBinding> binding_;
     juce::ToggleButton button_;
-    std::unique_ptr<juce::ButtonParameterAttachment> attachment_;
 };
 
 } // namespace theme

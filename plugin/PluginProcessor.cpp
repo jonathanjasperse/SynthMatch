@@ -16,6 +16,11 @@ juce::String toJuce(std::string_view s) { return juce::String::fromUTF8(s.data()
 
 constexpr const char* kExtraTag = "SynthMatchExtra";
 
+std::size_t playableFrames(const synthmatch::StereoBuffer& audio)
+{
+    return std::min(audio.left.size(), audio.right.size());
+}
+
 } // namespace
 
 SynthMatchProcessor::SynthMatchProcessor()
@@ -88,9 +93,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout SynthMatchProcessor::createL
 void SynthMatchProcessor::prepareToPlay(double sampleRate, int)
 {
     currentSampleRate_.store(sampleRate);
+    blockRate_ = sampleRate;
     engine_.prepare(sampleRate);
     engine_.setParams(engineParams_);
+    limiter_.prepare(sampleRate);
     matchEqSeen_ = matchEqVersion_.load() - 1; // makes the next block pass the match EQ to the engine
+
+    // The engine has just dropped its voices, so whatever was playing stops.
+    // Audio isn't running now, so this thread may touch the audio thread's state.
+    previewActive_ = false;
+    stopReference();
+    previewing_.store(false);
+    // Convert the reference to this rate on the message thread, before it's played.
+    triggerAsyncUpdate();
 }
 
 bool SynthMatchProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -98,28 +113,42 @@ bool SynthMatchProcessor::isBusesLayoutSupported(const BusesLayout& layouts) con
     return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
 }
 
-void SynthMatchProcessor::takePreviewRequest()
-{
-    const juce::SpinLock::ScopedTryLockType lock(previewLock_);
-    if (!lock.isLocked() || pendingRequest_ == previewSeen_)
-        return;
-    previewSeen_ = pendingRequest_;
+// ---------------------------------------------------------------- audio thread
 
-    // Release whatever the previous preview was still holding.
-    for (int i = 0; i < previewCount_; ++i) {
-        const auto& n = previewNotes_[static_cast<std::size_t>(i)];
-        if (n.on <= previewPos_ && n.off > previewPos_)
-            engine_.noteOff(n.note);
+void SynthMatchProcessor::takePlayRequest()
+{
+    if (!requests_.hasNew())
+        return;
+
+    // Release the notes the previous preview still holds. Each block plays the
+    // events in [previewPos_, end) and then moves previewPos_ to end, so a note
+    // is held when it started before previewPos_ and its off isn't played yet.
+    if (previewActive_) {
+        const auto& old = requests_.front();
+        for (int i = 0; i < old.count; ++i) {
+            const auto& n = old.notes[static_cast<std::size_t>(i)];
+            if (n.on < previewPos_ && n.off >= previewPos_)
+                engine_.noteOff(n.note);
+        }
     }
 
-    previewCount_ = pendingCount_;
-    std::copy_n(pendingNotes_.begin(), pendingCount_, previewNotes_.begin());
+    requests_.take();
+    const auto& r = requests_.front();
+
     previewPos_ = 0;
-    previewEnd_ = 0;
-    for (int i = 0; i < previewCount_; ++i)
-        previewEnd_ = std::max(previewEnd_, previewNotes_[static_cast<std::size_t>(i)].off);
-    previewEnd_ += static_cast<std::int64_t>(pendingTail_ * currentSampleRate_.load());
-    previewing_.store(previewCount_ > 0);
+    std::int64_t lastOff = -1;
+    for (int i = 0; i < r.count; ++i)
+        lastOff = std::max(lastOff, r.notes[static_cast<std::size_t>(i)].off);
+    // Keep going until the last note-off has been played, then the tail.
+    previewEnd_ = std::max(lastOff + 1, lastOff + static_cast<std::int64_t>(r.tailSec * blockRate_));
+    previewActive_ = r.count > 0;
+    previewing_.store(previewActive_, std::memory_order_relaxed);
+
+    referenceActive_ = r.reference != nullptr && r.reference->sampleRate == blockRate_ &&
+                       r.referenceGeneration == referenceGeneration_.load(std::memory_order_relaxed) &&
+                       r.referenceStart < playableFrames(*r.reference);
+    referencePos_ = r.referenceStart;
+    auditioning_.store(referenceActive_, std::memory_order_relaxed);
 }
 
 void SynthMatchProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -146,12 +175,18 @@ void SynthMatchProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
         engineParams_ = values;
     }
 
-    if (const auto version = matchEqVersion_.load(std::memory_order_acquire); version != matchEqSeen_) {
+    // Skipped while a write is under way (odd version) or if one started
+    // during the copy; the next block tries again.
+    if (const auto version = matchEqVersion_.load(std::memory_order_acquire);
+        version != matchEqSeen_ && (version & 1u) == 0) {
         synthmatch::MatchEqGains gains;
         for (std::size_t b = 0; b < gains.size(); ++b)
             gains[b] = matchEq_[b].load(std::memory_order_relaxed);
-        engine_.setMatchEq(gains);
-        matchEqSeen_ = version;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (matchEqVersion_.load(std::memory_order_relaxed) == version) {
+            engine_.setMatchEq(gains);
+            matchEqSeen_ = version;
+        }
     }
 
     if (auto* host = getPlayHead())
@@ -159,7 +194,7 @@ void SynthMatchProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
             if (const auto bpm = position->getBpm())
                 engine_.setTempo(*bpm);
 
-    takePreviewRequest();
+    takePlayRequest();
 
     // This block's preview events, in order.
     struct PreviewEvent {
@@ -170,10 +205,11 @@ void SynthMatchProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
     };
     std::array<PreviewEvent, 2 * kMaxPreviewNotes> events{};
     int numEvents = 0;
-    if (previewing_.load(std::memory_order_relaxed)) {
+    if (previewActive_) {
+        const auto& request = requests_.front();
         const std::int64_t end = previewPos_ + numSamples;
-        for (int i = 0; i < previewCount_; ++i) {
-            const auto& n = previewNotes_[static_cast<std::size_t>(i)];
+        for (int i = 0; i < request.count; ++i) {
+            const auto& n = request.notes[static_cast<std::size_t>(i)];
             if (n.off >= previewPos_ && n.off < end)
                 events[static_cast<std::size_t>(numEvents++)] = {static_cast<int>(n.off - previewPos_), false, n.note, 0.0f};
             if (n.on >= previewPos_ && n.on < end)
@@ -183,8 +219,10 @@ void SynthMatchProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
             return a.offset != b.offset ? a.offset < b.offset : (!a.on && b.on);
         });
         previewPos_ = end;
-        if (previewPos_ >= previewEnd_)
-            previewing_.store(false);
+        if (previewPos_ >= previewEnd_) {
+            previewActive_ = false;
+            previewing_.store(false, std::memory_order_relaxed);
+        }
     }
 
     float* left = buffer.getWritePointer(0);
@@ -210,51 +248,83 @@ void SynthMatchProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
             else
                 engine_.noteOff(e.note);
         } else {
-            handleMidi((*midiIt).getMessage());
+            // The raw bytes: building a MidiMessage would allocate for SysEx.
+            const auto event = *midiIt;
+            handleMidi(event.data, event.numBytes);
             ++midiIt;
         }
     }
     if (pos < numSamples)
         engine_.process(left + pos, right + pos, numSamples - pos);
 
-    if (auditioning_.load(std::memory_order_relaxed))
+    if (referenceActive_)
         renderReference(left, right, numSamples);
+
+    // Last of all, so nothing that leaves the plugin can clip.
+    limiter_.process(left, right, numSamples);
+}
+
+void SynthMatchProcessor::stopReference()
+{
+    referenceActive_ = false;
+    auditioning_.store(false, std::memory_order_relaxed);
 }
 
 void SynthMatchProcessor::renderReference(float* left, float* right, int numSamples)
 {
-    const juce::SpinLock::ScopedTryLockType lock(referenceLock_);
-    if (!lock.isLocked() || reference_ == nullptr)
+    const auto& request = requests_.front();
+    // A new file, or a new device rate, stops it; the interface plays it again.
+    if (request.referenceGeneration != referenceGeneration_.load(std::memory_order_relaxed) ||
+        request.reference->sampleRate != blockRate_) {
+        stopReference();
         return;
-
-    const auto& ref = *reference_;
-    const double step = ref.sampleRate / currentSampleRate_.load();
-    const auto frames = static_cast<double>(ref.numFrames());
-    for (int i = 0; i < numSamples; ++i) {
-        if (referencePos_ >= frames - 1.0) {
-            auditioning_.store(false);
-            break;
-        }
-        const auto index = static_cast<std::size_t>(referencePos_);
-        const auto t = static_cast<float>(referencePos_ - static_cast<double>(index));
-        left[i] += ref.left[index] + t * (ref.left[index + 1] - ref.left[index]);
-        right[i] += ref.right[index] + t * (ref.right[index + 1] - ref.right[index]);
-        referencePos_ += step;
     }
+
+    // Already at the device rate, so this only copies.
+    const auto& ref = *request.reference;
+    const auto frames = playableFrames(ref);
+    const auto n = std::min(static_cast<std::size_t>(numSamples), frames - referencePos_);
+    const float* fromLeft = ref.left.data() + referencePos_;
+    const float* fromRight = ref.right.data() + referencePos_;
+    for (std::size_t i = 0; i < n; ++i) {
+        left[i] += fromLeft[i];
+        right[i] += fromRight[i];
+    }
+    referencePos_ += n;
+    if (referencePos_ >= frames)
+        stopReference();
 }
 
-void SynthMatchProcessor::handleMidi(const juce::MidiMessage& message)
+void SynthMatchProcessor::handleMidi(const juce::uint8* data, int numBytes)
 {
-    if (message.isNoteOn())
-        engine_.noteOn(message.getNoteNumber(), message.getFloatVelocity());
-    else if (message.isNoteOff())
-        engine_.noteOff(message.getNoteNumber());
-    else if (message.isPitchWheel())
-        engine_.setPitchBend(static_cast<float>(message.getPitchWheelValue() - 8192) / 8192.0f);
-    else if (message.isAllSoundOff())
-        engine_.allSoundOff();
-    else if (message.isAllNotesOff())
-        engine_.allNotesOff();
+    // Only channel messages (1 to 3 bytes); SysEx and meta events are ignored.
+    if (numBytes < 1 || numBytes > 3)
+        return;
+    const int status = data[0] & 0xf0;
+    const int data1 = numBytes > 1 ? data[1] : 0;
+    const int data2 = numBytes > 2 ? data[2] : 0;
+    switch (status) {
+    case 0x90:
+        if (data2 > 0) {
+            engine_.noteOn(data1, static_cast<float>(data2) * (1.0f / 127.0f));
+            break;
+        }
+        [[fallthrough]]; // a note-on with velocity 0 is a note-off
+    case 0x80:
+        engine_.noteOff(data1);
+        break;
+    case 0xe0:
+        engine_.setPitchBend(static_cast<float>((data1 | (data2 << 7)) - 8192) / 8192.0f);
+        break;
+    case 0xb0:
+        if (data1 == 120)
+            engine_.allSoundOff();
+        else if (data1 == 123)
+            engine_.allNotesOff();
+        break;
+    default:
+        break;
+    }
 }
 
 // ---------------------------------------------------------------- message thread
@@ -282,6 +352,9 @@ void SynthMatchProcessor::setParams(const synthmatch::ParamValues& values)
 
 void SynthMatchProcessor::setMatchEq(const synthmatch::MatchEqGains& gainsDb)
 {
+    // Odd while writing, even when done (see processBlock).
+    matchEqVersion_.fetch_add(1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
     for (std::size_t b = 0; b < gainsDb.size(); ++b)
         matchEq_[b].store(gainsDb[b], std::memory_order_relaxed);
     matchEqVersion_.fetch_add(1, std::memory_order_release);
@@ -295,49 +368,111 @@ synthmatch::MatchEqGains SynthMatchProcessor::matchEq() const
     return gains;
 }
 
+namespace {
+
+// The reference at `rate`, resampled with a proper low-pass if the file's rate
+// differs. Message thread only: it takes a moment for a long file.
+std::shared_ptr<const synthmatch::StereoBuffer> atRate(const std::shared_ptr<const synthmatch::StereoBuffer>& source,
+                                                       double rate)
+{
+    if (source == nullptr || source->sampleRate == rate)
+        return source;
+    auto out = std::make_shared<synthmatch::StereoBuffer>();
+    out->sampleRate = rate;
+    rt::resample(source->left.data(), source->right.data(), std::min(source->left.size(), source->right.size()),
+                 source->sampleRate, rate, out->left, out->right);
+    return out;
+}
+
+} // namespace
+
+SynthMatchProcessor::PlayRequest& SynthMatchProcessor::newRequest()
+{
+    // This thread's own slot: the audio thread can't see it until it's sent.
+    auto& r = requests_.back();
+    r.count = 0;
+    r.tailSec = 0.0;
+    r.reference.reset();
+    r.referenceStart = 0;
+    r.referenceGeneration = 0;
+    return r;
+}
+
+void SynthMatchProcessor::sendRequest()
+{
+    requests_.publish();
+    // The slot this thread gets back may still hold an old reference: release
+    // it here, so the audio thread never frees anything.
+    requests_.back().reference.reset();
+}
+
 void SynthMatchProcessor::setReference(std::shared_ptr<const synthmatch::StereoBuffer> audio)
 {
+    JUCE_ASSERT_MESSAGE_THREAD
+    // A new generation stops the old file on the audio thread, which keeps
+    // reading it until then. Old buffers are released on this thread once no
+    // request holds them.
+    referenceGeneration_.fetch_add(1, std::memory_order_relaxed);
     auditioning_.store(false);
-    const juce::SpinLock::ScopedLockType lock(referenceLock_);
-    reference_ = std::move(audio); // the old buffer is freed here, on this thread
-    referencePos_ = 0.0;
+    referenceSource_ = std::move(audio);
+    referencePlayback_ = atRate(referenceSource_, currentSampleRate_.load());
+}
+
+void SynthMatchProcessor::handleAsyncUpdate()
+{
+    // Requests still holding the old copy keep it alive until it comes back
+    // through the triple buffer.
+    if (const double rate = currentSampleRate_.load(); referencePlayback_ != nullptr && referencePlayback_->sampleRate != rate)
+        referencePlayback_ = atRate(referenceSource_, rate);
 }
 
 void SynthMatchProcessor::playReference(double fromSec)
 {
-    {
-        const juce::SpinLock::ScopedLockType lock(referenceLock_);
-        if (reference_ == nullptr)
-            return;
-        referencePos_ = std::max(0.0, fromSec) * reference_->sampleRate;
-    }
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (referenceSource_ == nullptr)
+        return;
+    // In case the rate changed and the async update hasn't run yet.
+    if (const double rate = currentSampleRate_.load(); referencePlayback_ == nullptr || referencePlayback_->sampleRate != rate)
+        referencePlayback_ = atRate(referenceSource_, rate);
+
+    auto& request = newRequest();
+    request.reference = referencePlayback_;
+    request.referenceStart = static_cast<std::size_t>(std::max(0.0, fromSec) * referencePlayback_->sampleRate);
+    request.referenceGeneration = referenceGeneration_.load(std::memory_order_relaxed);
+    // The flags go first, so the audio thread's answer to this request is the
+    // last word (it clears them if it can't play it).
+    previewing_.store(false);
     auditioning_.store(true);
+    sendRequest();
 }
 
 void SynthMatchProcessor::playNotes(const std::vector<synthmatch::NoteEvent>& notes, double tailSec)
 {
+    JUCE_ASSERT_MESSAGE_THREAD
     const double rate = currentSampleRate_.load();
-    const juce::SpinLock::ScopedLockType lock(previewLock_);
-    pendingCount_ = 0;
+    auto& request = newRequest();
     for (const auto& n : notes) {
-        if (pendingCount_ >= kMaxPreviewNotes)
+        if (request.count >= kMaxPreviewNotes)
             break;
-        auto& p = pendingNotes_[static_cast<std::size_t>(pendingCount_++)];
+        auto& p = request.notes[static_cast<std::size_t>(request.count++)];
         p.on = static_cast<std::int64_t>(std::max(0.0, n.startSec) * rate);
         p.off = std::max(p.on + 1, static_cast<std::int64_t>((n.startSec + n.durationSec) * rate));
         p.note = n.note;
         p.velocity = n.velocity;
     }
-    pendingTail_ = tailSec;
-    ++pendingRequest_;
+    request.tailSec = tailSec;
+    auditioning_.store(false);
+    previewing_.store(request.count > 0);
+    sendRequest();
 }
 
 void SynthMatchProcessor::stopPlayback()
 {
+    JUCE_ASSERT_MESSAGE_THREAD
+    newRequest();
     auditioning_.store(false);
-    const juce::SpinLock::ScopedLockType lock(previewLock_);
-    pendingCount_ = 0;
-    ++pendingRequest_;
+    previewing_.store(false);
+    sendRequest();
 }
 
 juce::AudioProcessorEditor* SynthMatchProcessor::createEditor() { return new SynthMatchEditor(*this); }
