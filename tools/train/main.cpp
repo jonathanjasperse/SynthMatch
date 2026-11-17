@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -118,7 +119,13 @@ int loadGraded(const std::filesystem::path& dir, int minRating, std::vector<Trai
         auto features = encoderInputFor(*audio);
         if (features.empty())
             continue;
-        out.push_back({std::move(features), preset->params});
+        // The features are for the note detected in the recording, which
+        // oscillator 1 plays before the matcher moves the key (see
+        // MatchResult::keyShift). Put the preset back in that frame.
+        auto params = preset->params;
+        if (!moveKey(params, static_cast<int>(std::lround(params[param::Osc1Coarse]))))
+            continue;
+        out.push_back({std::move(features), params});
         ++used;
     }
     std::printf("%s: %d of %d close matches usable\n", dir.string().c_str(), used, close);
@@ -139,7 +146,7 @@ int benchmark(int count, const std::string& modelPath, int budget, int attempts,
     double sumStart = 0.0, sumSearch = 0.0, sumFinal = 0.0, sumSeconds = 0.0, sumGuess = 0.0, sumOracle = 0.0;
     int matched = 0, encoderWins = 0;
 
-    std::printf("%4s  %-5s %6s  %-12s %8s %8s %8s %8s %8s  %s\n", "#", "note", "held", "found", "oracle", "guess", "start",
+    std::printf("%4s  %-5s %6s  %-15s %8s %8s %8s %8s %8s  %s\n", "#", "note", "held", "found", "oracle", "guess", "start",
                 "search", "final", "time");
     for (int i = 0; i < count; ++i) {
         // Seeds far away from anything used in training.
@@ -177,7 +184,8 @@ int benchmark(int count, const std::string& modelPath, int budget, int attempts,
 
         // The oracle: the true preset playing the notes that were detected. The
         // best the search could do; if it isn't near zero, the note detection is
-        // what limits the match.
+        // what limits the match. (The result's notes may have been moved up to
+        // its loudest oscillator; the true preset plays the detected ones.)
         StereoBuffer section;
         section.sampleRate = reference.sampleRate;
         const auto first = static_cast<std::ptrdiff_t>(result.startSample);
@@ -186,12 +194,19 @@ int benchmark(int count, const std::string& modelPath, int budget, int attempts,
         section.right.assign(reference.right.begin() + first, reference.right.begin() + last);
         Preset truth;
         truth.params = sound.params;
-        const double oracle = presetDistance(section, truth, result.notes);
+        auto detected = result.notes;
+        for (auto& n : detected)
+            n.note -= result.keyShift;
+        const double oracle = presetDistance(section, truth, detected);
 
-        char found[32];
-        std::snprintf(found, sizeof found, "%d x%zu %.2fs", result.notes.empty() ? 0 : result.notes[0].note, result.notes.size(),
-                      result.notes.empty() ? 0.0 : result.notes[0].durationSec);
-        std::printf("%4d  %-5d %5.2fs  %-12s %8.2f %8.2f %8.2f %8.2f %8.2f  %4.1fs%s\n", i + 1, sound.note.note,
+        // The note detected, and the key it was moved to if it was.
+        char found[40];
+        char moved[12] = "";
+        if (result.keyShift != 0)
+            std::snprintf(moved, sizeof moved, "%+d", result.keyShift);
+        std::snprintf(found, sizeof found, "%d%s x%zu %.2fs", detected.empty() ? 0 : detected[0].note, moved,
+                      detected.size(), detected.empty() ? 0.0 : detected[0].durationSec);
+        std::printf("%4d  %-5d %5.2fs  %-15s %8.2f %8.2f %8.2f %8.2f %8.2f  %4.1fs%s\n", i + 1, sound.note.note,
                     sound.note.durationSec, found, oracle, guessDistance, result.startDistance, result.searchDistance,
                     result.distance, seconds, result.usedEncoder ? "  enc" : "");
         sumOracle += oracle;
@@ -211,7 +226,7 @@ int benchmark(int count, const std::string& modelPath, int budget, int attempts,
                         std::string(choiceName(spec(param::FilterType), p[param::FilterType])).c_str(), p[param::FilterCutoffHz],
                         p[param::FilterResonance], p[param::FilterEnvAmount], p[param::AmpSustain], p[param::AmpDecayMs],
                         p[param::AmpReleaseMs], p[param::DelayOn] > 0.5f ? "on" : "off", p[param::ReverbOn] > 0.5f ? "on" : "off");
-            for (const auto& n : result.notes)
+            for (const auto& n : detected)
                 std::printf("        found %d at %.2f for %.2f\n", n.note, n.startSec, n.durationSec);
         }
         sumGuess += guessDistance;

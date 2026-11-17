@@ -145,13 +145,19 @@ int main(int argc, char** argv)
         return fail("no references found");
 
     std::optional<Encoder> encoder;
-    if (modelPath.empty() && fs::exists("models/encoder.smm"))
+    const bool defaultModel = modelPath.empty() && fs::exists("models/encoder.smm");
+    if (defaultModel)
         modelPath = "models/encoder.smm";
     if (!modelPath.empty()) {
         std::string error;
         encoder = Encoder::load(modelPath, &error);
-        if (!encoder)
+        // The default model may be out of date; matching works without it.
+        if (!encoder && defaultModel) {
+            std::printf("Not using %s: %s\n", modelPath.string().c_str(), error.c_str());
+            modelPath.clear();
+        } else if (!encoder) {
             return fail(error);
+        }
     }
 
     fs::create_directories(out / "items");

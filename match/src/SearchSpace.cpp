@@ -126,7 +126,9 @@ const SearchSpace& SearchSpace::standard()
 
         choice(param::Lfo1Target, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f}, true);
         choice(param::Lfo1Wave, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f}, true);
-        continuous(param::Lfo1RateHz, true);
+        // Vibrato, tremolo and filter wobble. Slower than this, an LFO hardly
+        // moves within a note and mostly works as a fixed offset.
+        limited(param::Lfo1RateHz, 0.5f, 15.0f, true);
         continuous(param::Lfo1Depth, true);
 
         choice(param::DelayOn, {0.0f, 1.0f}, true);
@@ -158,7 +160,11 @@ std::vector<bool> audibleDims(const SearchSpace& space, const ParamValues& p)
     const bool envMoves = std::abs(value(param::FilterEnvAmount)) > 0.1f;
     const bool unisonOn = value(param::UnisonVoices) > 1.0f;
     const auto lfoTarget = static_cast<dsp::LfoTarget>(static_cast<int>(value(param::Lfo1Target)));
-    const bool lfoOn = lfoTarget != dsp::LfoTarget::Off && value(param::Lfo1Depth) > 0.02f;
+    // A pitch LFO is heard from about 3 cents of vibrato.
+    const double lfoDepth = value(param::Lfo1Depth);
+    const bool lfoOn = lfoTarget == dsp::LfoTarget::Pitch
+                           ? 100.0 * dsp::kLfoPitchSemitones * lfoDepth * lfoDepth >= 3.0
+                           : lfoTarget != dsp::LfoTarget::Off && lfoDepth > 0.02;
     const bool delayOn = value(param::DelayOn) >= 0.5f && value(param::DelayMix) > 0.02f;
     const bool reverbOn = value(param::ReverbOn) >= 0.5f && value(param::ReverbMix) > 0.02f;
     const bool ampSustains = value(param::AmpSustain) > 0.02f;

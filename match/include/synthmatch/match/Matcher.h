@@ -5,17 +5,21 @@
 //
 //   1. Work out which notes the recording plays (Pitch.h).
 //   2. Make a starting guess: from the trained encoder if there is one (see
-//      Encoder.h), and from simple measurements of the envelope and brightness.
+//      Encoder.h), and from simple measurements of the envelope, brightness,
+//      vibrato and tremolo (Modulation.h).
 //   3. Search: render candidate presets through the real engine, playing the
 //      same notes, and keep moving towards the ones whose spectrogram is
 //      closest to the recording (CMA-ES, see Optimizer.h).
-//   4. EQ match: compare the long-term spectra of the result and the
+//   4. Tidy up: drop what the recording gives no evidence for (simplifyPreset).
+//   5. EQ match: compare the long-term spectra of the result and the
 //      recording, and store the difference as the preset's match EQ curve.
+//   6. Move the key so the loudest oscillator plays the notes (moveKey).
 //
 // Everything runs on the CPU. The result is deterministic for a given seed.
 
 #include "synthmatch/Preset.h"
 #include "synthmatch/Render.h"
+#include "synthmatch/match/Modulation.h"
 
 #include <atomic>
 #include <cstdint>
@@ -53,11 +57,17 @@ struct MatchResult {
     std::string error; // why not, when ok is false
 
     Preset preset;
-    std::vector<NoteEvent> notes; // the notes found in the recording
+    std::vector<NoteEvent> notes; // the notes found in the recording, for this preset (see keyShift)
+    // Semitones (whole octaves, never down) the notes were moved up so the
+    // preset's loudest oscillator plays them: a sub-oscillator makes the
+    // recording's period an octave or two below the key. The note detected is
+    // notes[i].note - keyShift.
+    int keyShift = 0;
     double sampleRate = 0.0;
     std::size_t startSample = 0;  // the part of the recording that was matched
     std::size_t numSamples = 0;
     double pitchConfidence = 0.0; // low for chords or noise
+    ModulationEstimate modulation; // the vibrato or tremolo measured in the recording
 
     double startDistance = 0.0;    // of the starting guess, in dB
     double searchDistance = 0.0;   // after the search, before the EQ match
@@ -75,6 +85,23 @@ MatchResult matchSound(const StereoBuffer& reference, const MatchOptions& option
 // The distance between a recording and a preset playing the given notes, as
 // the matcher measures it. Useful for tests and for checking a result.
 double presetDistance(const StereoBuffer& reference, const Preset& preset, std::span<const NoteEvent> notes);
+
+// Moves the key a preset is played from without changing its sound: every
+// oscillator goes down `semitones` (the notes are to go up as much), and a
+// key-tracked cutoff is moved to make up for the new notes. Returns false, and
+// leaves `params` alone, if an audible oscillator or the cutoff would leave
+// its range.
+bool moveKey(ParamValues& params, int semitones);
+
+// The clean-up the matcher does after its search, on its own: simplifies what
+// the recording gives no evidence for, as long as all the changes together
+// make the match at most `marginDb` less close. A delay whose echo comes after
+// the recording ends goes, and one whose mix only turns the dry sound down goes
+// or drops to half. A pitch LFO that works as a fixed transpose (stepped, slow
+// or deeper than a semitone) goes, or becomes a sine vibrato. The level is
+// kept: GainDb makes up for what the changes add or take away.
+Preset simplifyPreset(const StereoBuffer& reference, const Preset& preset, std::span<const NoteEvent> notes,
+                      double marginDb = 0.15);
 
 // The encoder's input for a recording, prepared exactly as matchSound prepares
 // it: the first note found, at the sample rate the search runs at. Empty when

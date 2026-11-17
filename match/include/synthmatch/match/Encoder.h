@@ -12,6 +12,7 @@
 // in Encoder.cpp: no ML runtime, no GPU.
 
 #include "synthmatch/Render.h"
+#include "synthmatch/match/Pitch.h"
 #include "synthmatch/match/SearchSpace.h"
 
 #include <cstddef>
@@ -30,11 +31,14 @@ namespace synthmatch::match {
 //  - how the level and brightness wobble over time (LFOs, detune beating)
 //  - how much of the sound is harmonic rather than noise
 //  - the note and how long it was held
+//  - the measured vibrato and tremolo (rate, depth, how steady), see Modulation.h
 std::size_t encoderFeatureCount();
 // `endSec` is where to stop listening (the start of the next note); negative
-// means the end of the recording.
+// means the end of the recording. `pitch` is the recording's pitch track, if
+// there is one already (times relative to the start of `mono`); without it the
+// pitch is tracked here.
 std::vector<float> encoderFeatures(std::span<const float> mono, double sampleRate, const NoteEvent& note,
-                                   double endSec = -1.0);
+                                   double endSec = -1.0, std::span<const PitchFrame> pitch = {});
 
 // A fully connected network: ReLU between layers, raw outputs at the end.
 struct Mlp {
@@ -49,7 +53,7 @@ struct Mlp {
     std::size_t outputSize() const { return layers.empty() ? 0 : layers.back().outputs; }
     std::size_t parameterCount() const;
 
-    // Random starting weights for the given layer sizes, e.g. {625, 512, 512, 80}.
+    // Random starting weights for the given layer sizes, e.g. {631, 512, 512, 80}.
     static Mlp create(std::span<const std::size_t> sizes, std::uint32_t seed);
 
     std::vector<float> forward(std::span<const float> input) const;
@@ -69,7 +73,7 @@ public:
 
     // The guess, as a point in the search space (one value in 0..1 per dimension).
     std::vector<double> predict(std::span<const float> mono, double sampleRate, const NoteEvent& note,
-                                double endSec = -1.0) const;
+                                double endSec = -1.0, std::span<const PitchFrame> pitch = {}) const;
     std::vector<double> predictFromFeatures(std::span<const float> features) const;
 
     const Mlp& network() const { return network_; }

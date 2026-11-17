@@ -5,6 +5,7 @@
 #include "synthmatch/dsp/Oscillator.h"
 #include "synthmatch/match/Features.h"
 #include "synthmatch/match/Matcher.h"
+#include "synthmatch/match/Modulation.h"
 #include "synthmatch/match/Parallel.h"
 
 #include <algorithm>
@@ -437,19 +438,33 @@ RandomSound randomSound(const SearchSpace& space, std::uint32_t seed)
     set(param::UnisonDetune, rng.range(3.0, double{kMaxUnisonDetuneCents}));
 
     // LFO: usually off; vibrato and filter movement are the common uses.
-    const auto target = static_cast<dsp::LfoTarget>(rng.pick({0.65, 0.12, 0.12, 0.06, 0.05}));
+    // (Each target takes the same number of draws, so the settings after
+    // this don't depend on it.)
+    const auto target = static_cast<dsp::LfoTarget>(rng.pick({0.6, 0.18, 0.12, 0.06, 0.04}));
+    const bool vibratoOrTremolo = target == dsp::LfoTarget::Pitch || target == dsp::LfoTarget::Amp;
     set(param::Lfo1Target, static_cast<double>(target));
-    set(param::Lfo1Wave, static_cast<double>(rng.pick({0.5, 0.2, 0.1, 0.1, 0.1})));
-    set(param::Lfo1RateHz, rng.logRange(0.2, 20.0));
+    // Vibrato and tremolo are nearly always smooth; other uses take any shape.
+    const std::size_t lfoWave = vibratoOrTremolo ? rng.pick({0.7, 0.25, 0.05 / 3.0, 0.05 / 3.0, 0.05 / 3.0})
+                                                 : rng.pick({0.5, 0.2, 0.1, 0.1, 0.1});
+    set(param::Lfo1Wave, static_cast<double>(lfoWave));
+    const double rateDraw = rng.uniform();
+    const auto rateBetween = [&](double lo, double hi) { return lo * std::pow(hi / lo, rateDraw); };
     switch (target) {
     case dsp::LfoTarget::Pitch:
-        set(param::Lfo1Depth, rng.range(0.03, 0.3));
-        set(param::Lfo1RateHz, rng.logRange(2.0, 10.0));
+        // Vibrato, sized in cents: from barely there to wide.
+        set(param::Lfo1Depth, vibratoDepth(rng.logRange(5.0, 80.0)));
+        set(param::Lfo1RateHz, rateBetween(3.5, 8.5));
+        break;
+    case dsp::LfoTarget::Amp:
+        set(param::Lfo1RateHz, rateBetween(2.0, 12.0));
+        set(param::Lfo1Depth, rng.range(0.1, 0.7));
         break;
     case dsp::LfoTarget::Cutoff:
+        set(param::Lfo1RateHz, rateBetween(0.5, 15.0));
         set(param::Lfo1Depth, rng.range(0.05, 0.6));
         break;
     default:
+        set(param::Lfo1RateHz, rateBetween(0.5, 15.0));
         set(param::Lfo1Depth, rng.range(0.1, 1.0));
         break;
     }
@@ -476,7 +491,8 @@ RandomSound randomSound(const SearchSpace& space, std::uint32_t seed)
     // The note: anywhere from a low bass to a high lead, held for a short or long time.
     sound.note.startSec = 0.0;
     sound.note.note = 28 + static_cast<int>(rng.uniform() * 61.0); // E1 to E6
-    sound.note.durationSec = rng.logRange(0.15, 1.6);
+    // Long enough to hear a few cycles of vibrato or tremolo.
+    sound.note.durationSec = vibratoOrTremolo ? rng.logRange(0.7, 2.5) : rng.logRange(0.15, 1.6);
     sound.note.velocity = 1.0f;
     sound.seconds = sound.note.durationSec + 1.5;
     return sound;

@@ -5,6 +5,7 @@ add_library(synthmatch_match STATIC
     src/Encoder.cpp
     src/Features.cpp
     src/Matcher.cpp
+    src/Modulation.cpp
     src/Optimizer.cpp
     src/Pitch.cpp
     src/SearchSpace.cpp

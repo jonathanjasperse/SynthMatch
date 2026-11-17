@@ -1,6 +1,7 @@
 #include "synthmatch/match/Encoder.h"
 
 #include "synthmatch/match/Features.h"
+#include "synthmatch/match/Modulation.h"
 
 #include <algorithm>
 #include <array>
@@ -25,12 +26,21 @@ constexpr std::size_t kSegments = (kHoldEdges.size() - 1) + (kReleaseEdges.size(
 constexpr std::size_t kPerSegment = kMelBands + kHarmonics + 1;
 constexpr std::array<double, 5> kWobbleHz{1.0, 2.0, 4.0, 8.0, 16.0};
 constexpr std::size_t kWobbleFeatures = 2 * (1 + kWobbleHz.size());
-constexpr std::size_t kFeatureCount = kSegments * kPerSegment + kWobbleFeatures + 3;
+constexpr std::size_t kModulationFeatures = 6;
+constexpr std::size_t kFeatureCount = kSegments * kPerSegment + kWobbleFeatures + 3 + kModulationFeatures;
 
 constexpr float kRangeDb = 80.0f;
 
 // Maps a level in dB (0 = the loudest thing in the clip) to 0..1.
 float unitLevel(float db) { return std::clamp(db, -kRangeDb, 0.0f) / kRangeDb + 1.0f; }
+
+// Maps a modulation rate to 0..1: 0 for none, 0.5 at 5 Hz, 0.5 more per two octaves.
+float unitRate(double hz)
+{
+    return hz > 0.0 ? static_cast<float>(std::clamp(0.5 + 0.5 * std::log2(hz / 5.0), 0.0, 1.0)) : 0.0f;
+}
+
+float unit(double x) { return static_cast<float>(std::clamp(x, 0.0, 1.0)); }
 
 float powerDb(double power) { return static_cast<float>(10.0 * std::log10(power + 1.0e-12)); }
 
@@ -134,7 +144,8 @@ struct Reader {
 };
 
 constexpr std::uint32_t kMagic = 0x4E454D53; // "SMEN"
-constexpr std::uint32_t kVersion = 1;
+// Version 2: the modulation features, and each dimension's range in the header.
+constexpr std::uint32_t kVersion = 2;
 
 static_assert(std::endian::native == std::endian::little, "model files are little-endian");
 
@@ -142,7 +153,8 @@ static_assert(std::endian::native == std::endian::little, "model files are littl
 
 std::size_t encoderFeatureCount() { return kFeatureCount; }
 
-std::vector<float> encoderFeatures(std::span<const float> input, double sampleRate, const NoteEvent& note, double endSec)
+std::vector<float> encoderFeatures(std::span<const float> input, double sampleRate, const NoteEvent& note, double endSec,
+                                   std::span<const PitchFrame> pitch)
 {
     std::vector<float> features(kFeatureCount, 0.0f);
 
@@ -269,6 +281,29 @@ std::vector<float> encoderFeatures(std::span<const float> input, double sampleRa
     extra[0] = total > 0.0 ? static_cast<float>(std::clamp(harmonic / total, 0.0, 1.0)) : 0.0f;
     extra[1] = static_cast<float>(note.note) / 127.0f;
     extra[2] = static_cast<float>(std::clamp(std::log2(duration / 0.05) / 6.0, 0.0, 1.0));
+
+    // Vibrato and tremolo, measured as the matcher measures them (the raw
+    // values, whether or not they are clear enough for the matcher to use).
+    std::vector<PitchFrame> track;
+    if (pitch.empty()) {
+        // Only the held note matters.
+        const auto heldSamples = std::min(mono.size(), static_cast<std::size_t>((duration + 0.1) * rate));
+        track = trackPitch(mono.first(heldSamples), rate);
+    } else {
+        for (const auto& f : pitch) {
+            track.push_back(f);
+            track.back().timeSec -= note.startSec;
+        }
+    }
+    const NoteEvent held{0.0, duration, note.note, note.velocity};
+    const auto modulation = measureModulation(track, mel, analyzer, std::span(&held, 1));
+    float* mod = extra + 3;
+    mod[0] = unitRate(modulation.vibrato.rateHz);
+    mod[1] = unit(modulation.vibrato.cents / 50.0);
+    mod[2] = unit(modulation.vibrato.strength);
+    mod[3] = unitRate(modulation.tremolo.rateHz);
+    mod[4] = unit(modulation.tremolo.db / 3.0);
+    mod[5] = unit(modulation.tremolo.strength);
     return features;
 }
 
@@ -373,9 +408,9 @@ std::vector<double> Encoder::predictFromFeatures(std::span<const float> features
 }
 
 std::vector<double> Encoder::predict(std::span<const float> mono, double sampleRate, const NoteEvent& note,
-                                     double endSec) const
+                                     double endSec, std::span<const PitchFrame> pitch) const
 {
-    return predictFromFeatures(encoderFeatures(mono, sampleRate, note, endSec));
+    return predictFromFeatures(encoderFeatures(mono, sampleRate, note, endSec, pitch));
 }
 
 bool Encoder::save(const std::filesystem::path& path, std::string* error) const
@@ -386,14 +421,17 @@ bool Encoder::save(const std::filesystem::path& path, std::string* error) const
     put(out, kVersion);
     put(out, static_cast<std::uint32_t>(kFeatureCount));
 
-    // Which parameters the outputs mean, so a model can't be used with a build
-    // whose search space has changed.
+    // Which parameters the outputs mean, and over what range, so a model can't
+    // be used with a build whose search space has changed.
     put(out, static_cast<std::uint32_t>(space.dims.size()));
     for (const auto& dim : space.dims) {
         const auto id = spec(dim.param).id;
         put(out, static_cast<std::uint32_t>(id.size()));
         out.insert(out.end(), id.begin(), id.end());
         put(out, static_cast<std::uint32_t>(dim.choices.size()));
+        put(out, dim.lo);
+        put(out, dim.hi);
+        put(out, static_cast<std::uint32_t>(dim.extended ? 1 : 0));
     }
 
     put(out, static_cast<std::uint32_t>(network_.layers.size()));
@@ -441,7 +479,10 @@ std::optional<Encoder> Encoder::fromMemory(std::span<const unsigned char> data, 
         const auto length = in.get<std::uint32_t>();
         const std::string id = in.text(length);
         const auto choices = in.get<std::uint32_t>();
-        if (!in.ok || id != spec(dim.param).id || choices != dim.choices.size())
+        const auto lo = in.get<float>(), hi = in.get<float>();
+        const auto extended = in.get<std::uint32_t>();
+        if (!in.ok || id != spec(dim.param).id || choices != dim.choices.size() || lo != dim.lo || hi != dim.hi ||
+            extended != (dim.extended ? 1u : 0u))
             return fail(kRetrain);
     }
 
