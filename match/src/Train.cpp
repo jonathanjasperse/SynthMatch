@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <initializer_list>
 #include <numbers>
 #include <numeric>
@@ -75,6 +76,146 @@ struct Dataset {
     const float* t(std::size_t i) const { return targets.data() + i * outputs; }
     const float* m(std::size_t i) const { return mask.data() + i * outputs; }
 };
+
+// Rendered training notes on disk (TrainOptions::saveData and loadData): a
+// header, a description of what the numbers mean, then the inputs, the
+// answers and the masks as raw little-endian floats.
+constexpr std::uint32_t kDataMagic = 0x44534D53; // "SMSD"
+constexpr std::uint32_t kDataVersion = 1;
+
+// What the inputs and answers mean: how many inputs the encoder takes, and
+// each search dimension's parameter, range and choices. Notes saved with a
+// different description can't be trained on.
+std::string dataLayout(const SearchSpace& space)
+{
+    std::string out = "inputs " + std::to_string(encoderFeatureCount()) + " outputs " + std::to_string(space.outputSize()) + "\n";
+    for (const auto& dim : space.dims) {
+        char line[160];
+        std::snprintf(line, sizeof line, "%s %.9g %.9g %d", std::string(spec(dim.param).id).c_str(),
+                      static_cast<double>(dim.lo), static_cast<double>(dim.hi), dim.extended ? 1 : 0);
+        out += line;
+        for (const float c : dim.choices) {
+            std::snprintf(line, sizeof line, " %.9g", static_cast<double>(c));
+            out += line;
+        }
+        out += "\n";
+    }
+    return out;
+}
+
+template <typename T>
+void putValue(std::ofstream& file, T value)
+{
+    file.write(reinterpret_cast<const char*>(&value), sizeof value);
+}
+
+template <typename T>
+bool getValue(std::ifstream& file, T& value)
+{
+    file.read(reinterpret_cast<char*>(&value), sizeof value);
+    return file.gcount() == static_cast<std::streamsize>(sizeof value);
+}
+
+// In 64 MB pieces: a million notes come to a few gigabytes.
+constexpr std::size_t kDataChunkBytes = std::size_t{1} << 26;
+
+void putFloats(std::ofstream& file, const std::vector<float>& values)
+{
+    const char* at = reinterpret_cast<const char*>(values.data());
+    for (std::size_t left = values.size() * sizeof(float); left > 0 && file;) {
+        const std::size_t n = std::min(left, kDataChunkBytes);
+        file.write(at, static_cast<std::streamsize>(n));
+        at += n;
+        left -= n;
+    }
+}
+
+bool getFloats(std::ifstream& file, std::vector<float>& values)
+{
+    char* at = reinterpret_cast<char*>(values.data());
+    for (std::size_t left = values.size() * sizeof(float); left > 0;) {
+        const std::size_t n = std::min(left, kDataChunkBytes);
+        file.read(at, static_cast<std::streamsize>(n));
+        if (file.gcount() != static_cast<std::streamsize>(n))
+            return false;
+        at += n;
+        left -= n;
+    }
+    return true;
+}
+
+bool saveDataset(const std::filesystem::path& path, const std::string& layout, const Dataset& data, std::size_t validation,
+                 std::string& error)
+{
+    if (path.has_parent_path()) {
+        std::error_code ignored;
+        std::filesystem::create_directories(path.parent_path(), ignored);
+    }
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    putValue(file, kDataMagic);
+    putValue(file, kDataVersion);
+    putValue(file, static_cast<std::uint64_t>(layout.size()));
+    file.write(layout.data(), static_cast<std::streamsize>(layout.size()));
+    putValue(file, static_cast<std::uint64_t>(data.count));
+    putValue(file, static_cast<std::uint64_t>(data.inputs));
+    putValue(file, static_cast<std::uint64_t>(data.outputs));
+    putValue(file, static_cast<std::uint64_t>(validation));
+    putFloats(file, data.features);
+    putFloats(file, data.targets);
+    putFloats(file, data.mask);
+    file.close();
+    if (!file) {
+        error = "Couldn't write the rendered notes to " + path.string() + ".";
+        return false;
+    }
+    return true;
+}
+
+bool loadDataset(const std::filesystem::path& path, const std::string& layout, std::size_t expectedOutputs, Dataset& data,
+                 std::size_t& validation, std::string& error)
+{
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        error = "Couldn't open " + path.string() + ".";
+        return false;
+    }
+    const auto damaged = [&] {
+        error = path.string() + " is damaged or isn't a file of rendered training notes.";
+        return false;
+    };
+    std::uint32_t magic = 0, version = 0;
+    if (!getValue(file, magic) || magic != kDataMagic || !getValue(file, version))
+        return damaged();
+    std::uint64_t layoutSize = 0;
+    if (version != kDataVersion || !getValue(file, layoutSize) || layoutSize > (1u << 20)) {
+        error = path.string() + " was rendered by a different version of SynthMatch. Render the notes again.";
+        return false;
+    }
+    std::string saved(static_cast<std::size_t>(layoutSize), '\0');
+    file.read(saved.data(), static_cast<std::streamsize>(saved.size()));
+    if (file.gcount() != static_cast<std::streamsize>(saved.size()))
+        return damaged();
+    if (saved != layout) {
+        error = path.string() + " was rendered for other encoder inputs or another search space. Render the notes again.";
+        return false;
+    }
+    std::uint64_t count = 0, inputs = 0, outputs = 0, heldBack = 0;
+    if (!getValue(file, count) || !getValue(file, inputs) || !getValue(file, outputs) || !getValue(file, heldBack) ||
+        count == 0 || count > 100'000'000u || inputs != encoderFeatureCount() || outputs != expectedOutputs ||
+        heldBack >= count)
+        return damaged();
+    data.count = static_cast<std::size_t>(count);
+    data.inputs = static_cast<std::size_t>(inputs);
+    data.outputs = static_cast<std::size_t>(outputs);
+    data.features.resize(data.count * data.inputs);
+    data.targets.resize(data.count * data.outputs);
+    data.mask.resize(data.count * data.outputs);
+    if (!getFloats(file, data.features) || !getFloats(file, data.targets) || !getFloats(file, data.mask) ||
+        file.peek() != std::char_traits<char>::eof())
+        return damaged();
+    validation = static_cast<std::size_t>(heldBack);
+    return true;
+}
 
 // The training target for a preset: for a continuous dimension, its position
 // in 0..1; for a choice dimension, a 1 in the slot of the right choice. The
@@ -513,75 +654,97 @@ TrainResult trainEncoder(const TrainOptions& options)
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     };
 
-    // 1. Make the training data.
+    // 1. Make the training data: render it, or load notes rendered before.
     Dataset data;
-    // Graded real recordings first, then the synthetic notes (the validation
-    // set is taken from the end, so it stays purely synthetic and comparable).
-    const std::size_t repeat = static_cast<std::size_t>(std::max(1, options.extraRepeat));
-    std::size_t extraTotal = 0;
-    for (const auto& e : options.extra)
-        if (e.features.size() == encoderFeatureCount())
-            extraTotal += repeat;
-    data.count = extraTotal + options.samples;
-    data.inputs = encoderFeatureCount();
-    data.outputs = space.outputSize();
-    data.features.resize(data.count * data.inputs);
-    data.targets.resize(data.count * data.outputs);
-    data.mask.resize(data.count * data.outputs);
-
-    if (extraTotal > 0) {
-        std::size_t at = 0;
-        for (const auto& e : options.extra) {
-            if (e.features.size() != encoderFeatureCount())
-                continue;
-            for (std::size_t r = 0; r < repeat; ++r, ++at) {
-                std::copy(e.features.begin(), e.features.end(), data.features.begin() + static_cast<std::ptrdiff_t>(at * data.inputs));
-                makeTargets(space, e.params, data.targets.data() + at * data.outputs, data.mask.data() + at * data.outputs);
-            }
+    std::size_t validation = 0; // the last `validation` notes are held back to measure progress
+    const std::string layout = dataLayout(space);
+    if (!options.loadData.empty()) {
+        std::string error;
+        if (!loadDataset(options.loadData, layout, space.outputSize(), data, validation, error)) {
+            log(error);
+            return result;
         }
-        log("Added " + std::to_string(extraTotal / repeat) + " graded recordings (each repeated " + std::to_string(repeat) +
-            " times).");
-    }
-
-    // The last `validation` notes are held back to measure progress.
-    const auto validation = static_cast<std::size_t>(static_cast<double>(options.samples) * options.validationFraction);
-
-    log("Rendering " + std::to_string(options.samples) + " training notes on " + std::to_string(threads) + " threads" +
-        (options.detectNotes ? ", listening for the notes as matching does" : "") +
-        (options.augment ? ", with recording-like extras" : "") + "...");
-    std::atomic<std::size_t> done{0};
-    parallelFor(options.samples, threads, [&](std::size_t k) {
-        if (cancelled())
-            return;
-        const std::size_t i = extraTotal + k;
-        const std::uint32_t seed = options.seed * 1000003u + static_cast<std::uint32_t>(k);
-        const RandomSound sound = randomSound(space, seed);
-        RenderSettings settings;
-        settings.sampleRate = options.sampleRate;
-        settings.tailSec = sound.seconds - sound.note.durationSec;
-        const NoteEvent notes[] = {sound.note};
-        auto audio = render(sound.params, notes, settings);
-
-        // Held-back notes stay clean and use the true note, so the validation
-        // loss stays comparable between runs.
-        const bool heldBack = k >= options.samples - validation;
-        if (options.augment && !heldBack)
-            augment(audio, seed);
-        std::vector<float> features;
-        if (options.detectNotes && !heldBack)
-            features = encoderInputFor(audio);
-        if (features.size() != encoderFeatureCount()) // no note found: use the true one
-            features = encoderFeatures(toMono(audio.left, audio.right), options.sampleRate, sound.note);
-        std::copy(features.begin(), features.end(), data.features.begin() + static_cast<std::ptrdiff_t>(i * data.inputs));
-        makeTargets(space, sound.params, data.targets.data() + i * data.outputs, data.mask.data() + i * data.outputs);
-        ++done;
-    });
-    if (cancelled())
-        return result;
-    {
-        char line[96];
-        std::snprintf(line, sizeof line, "Rendered in %.0f s.", elapsed());
+        char line[160];
+        std::snprintf(line, sizeof line, "Loaded %zu rendered notes (%zu held back) in %.0f s.", data.count, validation,
+                      elapsed());
         log(line);
+    } else {
+        // Graded real recordings first, then the synthetic notes (the validation
+        // set is taken from the end, so it stays purely synthetic and comparable).
+        const std::size_t repeat = static_cast<std::size_t>(std::max(1, options.extraRepeat));
+        std::size_t extraTotal = 0;
+        for (const auto& e : options.extra)
+            if (e.features.size() == encoderFeatureCount())
+                extraTotal += repeat;
+        data.count = extraTotal + options.samples;
+        data.inputs = encoderFeatureCount();
+        data.outputs = space.outputSize();
+        data.features.resize(data.count * data.inputs);
+        data.targets.resize(data.count * data.outputs);
+        data.mask.resize(data.count * data.outputs);
+
+        if (extraTotal > 0) {
+            std::size_t at = 0;
+            for (const auto& e : options.extra) {
+                if (e.features.size() != encoderFeatureCount())
+                    continue;
+                for (std::size_t r = 0; r < repeat; ++r, ++at) {
+                    std::copy(e.features.begin(), e.features.end(),
+                              data.features.begin() + static_cast<std::ptrdiff_t>(at * data.inputs));
+                    makeTargets(space, e.params, data.targets.data() + at * data.outputs, data.mask.data() + at * data.outputs);
+                }
+            }
+            log("Added " + std::to_string(extraTotal / repeat) + " graded recordings (each repeated " + std::to_string(repeat) +
+                " times).");
+        }
+
+        validation = static_cast<std::size_t>(static_cast<double>(options.samples) * options.validationFraction);
+
+        log("Rendering " + std::to_string(options.samples) + " training notes on " + std::to_string(threads) + " threads" +
+            (options.detectNotes ? ", listening for the notes as matching does" : "") +
+            (options.augment ? ", with recording-like extras" : "") + "...");
+        std::atomic<std::size_t> done{0};
+        parallelFor(options.samples, threads, [&](std::size_t k) {
+            if (cancelled())
+                return;
+            const std::size_t i = extraTotal + k;
+            const std::uint32_t seed = options.seed * 1000003u + static_cast<std::uint32_t>(k);
+            const RandomSound sound = randomSound(space, seed);
+            RenderSettings settings;
+            settings.sampleRate = options.sampleRate;
+            settings.tailSec = sound.seconds - sound.note.durationSec;
+            const NoteEvent notes[] = {sound.note};
+            auto audio = render(sound.params, notes, settings);
+
+            // Held-back notes stay clean and use the true note, so the validation
+            // loss stays comparable between runs.
+            const bool heldBack = k >= options.samples - validation;
+            if (options.augment && !heldBack)
+                augment(audio, seed);
+            std::vector<float> features;
+            if (options.detectNotes && !heldBack)
+                features = encoderInputFor(audio);
+            if (features.size() != encoderFeatureCount()) // no note found: use the true one
+                features = encoderFeatures(toMono(audio.left, audio.right), options.sampleRate, sound.note);
+            std::copy(features.begin(), features.end(), data.features.begin() + static_cast<std::ptrdiff_t>(i * data.inputs));
+            makeTargets(space, sound.params, data.targets.data() + i * data.outputs, data.mask.data() + i * data.outputs);
+            ++done;
+        });
+        if (cancelled())
+            return result;
+        {
+            char line[96];
+            std::snprintf(line, sizeof line, "Rendered in %.0f s.", elapsed());
+            log(line);
+        }
+        if (!options.saveData.empty()) {
+            std::string error;
+            if (!saveDataset(options.saveData, layout, data, validation, error)) {
+                log(error);
+                return result;
+            }
+            log("Saved the rendered notes to " + options.saveData.string() + ".");
+        }
     }
 
     const std::size_t trainCount = data.count - validation; // the last `validation` examples are held back

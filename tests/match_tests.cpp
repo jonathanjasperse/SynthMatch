@@ -988,6 +988,48 @@ void testTrainingAndModelFile()
     quick.log = nullptr;
     const auto first = trainEncoder(quick), second = trainEncoder(quick);
     CHECK(first.ok && second.ok && first.report.validationLoss == second.report.validationLoss);
+
+    // Notes saved by one run train the same network when another run loads
+    // them instead of rendering. A damaged, mismatched or missing file is refused.
+    {
+        const auto dataPath = std::filesystem::temp_directory_path() /
+                              ("synthmatch_test_notes_" +
+                               std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".smd");
+        TrainOptions saving = quick;
+        saving.saveData = dataPath;
+        const auto saved = trainEncoder(saving);
+        TrainOptions loading = quick;
+        loading.samples = 1000; // ignored: the notes come from the file
+        loading.loadData = dataPath;
+        const auto reloaded = trainEncoder(loading);
+        CHECK(saved.ok && reloaded.ok);
+        CHECK(saved.report.validationLoss == first.report.validationLoss);
+        CHECK(reloaded.report.validationLoss == first.report.validationLoss);
+        if (first.ok && reloaded.ok)
+            CHECK(reloaded.encoder.predictFromFeatures(input) == first.encoder.predictFromFeatures(input));
+
+        const auto size = std::filesystem::exists(dataPath) ? std::filesystem::file_size(dataPath) : 0;
+        CHECK(size > 0);
+        if (size > 0) {
+            // Another search space: the description after the header differs.
+            {
+                std::fstream file(dataPath, std::ios::binary | std::ios::in | std::ios::out);
+                file.seekp(16);
+                file.put('x');
+            }
+            CHECK(!trainEncoder(loading).ok);
+            // Cut short.
+            {
+                std::fstream file(dataPath, std::ios::binary | std::ios::in | std::ios::out);
+                file.seekp(16);
+                file.put('i');
+            }
+            std::filesystem::resize_file(dataPath, size - 4);
+            CHECK(!trainEncoder(loading).ok);
+            std::filesystem::remove(dataPath);
+        }
+        CHECK(!trainEncoder(loading).ok); // no file at all
+    }
     TrainOptions plain = quick;
     plain.detectNotes = false;
     plain.augment = false;

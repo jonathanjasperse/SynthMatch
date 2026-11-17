@@ -106,6 +106,10 @@ renders itself, on the CPU:
 build/tools/train/Release/synthmatch_train --samples 100000 --epochs 30 --out models/encoder.smm
 ```
 
+Most of the time goes into rendering the notes, not training on them. Add
+`--save-data notes.smd` to keep them, and `--load-data notes.smd` trains another
+size or more epochs on the same notes without rendering them again.
+
 Measure a model on sounds it has never seen (leave out `--model` to compare
 without one):
 

@@ -102,6 +102,7 @@ Tracked track(std::span<const float> input, double sampleRate)
     std::vector<float> padded(x.begin(), x.end());
     padded.resize(x.size() + window + tauMax, 0.0f);
     x = padded;
+    const std::vector<double> xd(padded.begin(), padded.end()); // converted once, not at every lag
 
     std::vector<double> diff(tauMax + 1);
     const std::size_t numFrames = (x.size() - window - tauMax) / hop + 1;
@@ -120,15 +121,26 @@ Tracked track(std::span<const float> input, double sampleRate)
             continue;
 
         // YIN step 1: how different is the signal from itself shifted by tau?
-        // It is least different when tau is one period.
+        // It is least different when tau is one period. This loop is most of
+        // the time spent finding notes, so the sum is split across eight
+        // running totals: the additions no longer wait on each other, which
+        // makes it several times faster. Only the last bits of `d` change.
+        const double* sd = xd.data() + f * hop;
         for (std::size_t tau = 1; tau <= tauMax; ++tau) {
-            double d = 0.0;
-            const float* shifted = s + tau;
-            for (std::size_t j = 0; j < window; ++j) {
-                const double delta = static_cast<double>(s[j]) - shifted[j];
-                d += delta * delta;
+            const double* shifted = sd + tau;
+            double acc[8] = {};
+            std::size_t j = 0;
+            for (; j + 8 <= window; j += 8) {
+                for (std::size_t k = 0; k < 8; ++k) {
+                    const double delta = sd[j + k] - shifted[j + k];
+                    acc[k] += delta * delta;
+                }
             }
-            diff[tau] = d;
+            for (; j < window; ++j) {
+                const double delta = sd[j] - shifted[j];
+                acc[0] += delta * delta;
+            }
+            diff[tau] = ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
         }
 
         // Step 2: divide by the running average, so small lags don't win by default.

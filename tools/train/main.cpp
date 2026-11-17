@@ -40,6 +40,13 @@ void printUsage()
         "  --no-augment     keep training notes clean (no room, noise, tilt or\n"
         "                   saturation)\n"
         "\n"
+        "Rendering takes far longer than training, so the notes can be kept:\n"
+        "  --save-data PATH write the rendered notes to PATH (about 3 GB per million)\n"
+        "                   before training on them\n"
+        "  --load-data PATH train on notes saved with --save-data instead of\n"
+        "                   rendering; --samples, --graded, --no-detect and\n"
+        "                   --no-augment then come from the run that saved them\n"
+        "\n"
         "Learning from your grades (see tools/grade):\n"
         "  --graded DIR     a graded batch folder; repeatable. Every match you rated\n"
         "                   close becomes a training example: the real recording,\n"
@@ -303,6 +310,10 @@ int main(int argc, char** argv)
             graded.emplace_back(value);
         else if (arg == "--graded-min")
             gradedMin = std::clamp(std::atoi(value), 1, 5);
+        else if (arg == "--save-data")
+            options.saveData = value;
+        else if (arg == "--load-data")
+            options.loadData = value;
         else if (arg == "--graded-repeat")
             options.extraRepeat = std::max(1, std::atoi(value));
         else

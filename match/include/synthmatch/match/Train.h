@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <vector>
@@ -49,6 +50,16 @@ struct TrainOptions {
     };
     std::vector<Example> extra;
     int extraRepeat = 20;
+
+    // Rendering the notes takes far longer than training on them. A run with
+    // `saveData` writes the rendered notes (with the graded examples and the
+    // held-back ones) before training; a run with `loadData` trains on such a
+    // file instead of rendering, so one render can train several networks.
+    // Loading ignores `samples`, `extra`, `detectNotes` and `augment`: they
+    // come from the run that saved the file. A file made for another search
+    // space or other encoder inputs is refused.
+    std::filesystem::path saveData;
+    std::filesystem::path loadData;
 
     std::function<void(const std::string&)> log;
     const std::atomic<bool>* cancel = nullptr;
