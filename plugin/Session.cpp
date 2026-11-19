@@ -50,7 +50,6 @@ struct Session::LlmJob {
     std::thread thread;
     std::atomic<bool> cancel{false}, finished{false};
     std::atomic<int> received{0};
-    assist::Reply fallback;
     llm::Answer answer;
     std::string request; // what was asked, for checking the answer
 };
@@ -85,7 +84,6 @@ Session::Session(SynthMatchProcessor& processor) : processor_(processor)
     if (auto* s = settingsFile_.getUserSettings()) {
         llmSettings_.server = s->getValue("llmServer", llmSettings_.server);
         llmSettings_.model = s->getValue("llmModel", llmSettings_.model);
-        llmSettings_.mode = s->getValue("llmMode", llmSettings_.mode);
         modelChosen_ = s->containsKey("llmModel");
     }
 
@@ -98,7 +96,7 @@ Session::Session(SynthMatchProcessor& processor) : processor_(processor)
 #endif
 
     add(LogEntry::Kind::Info, "Describe a change to the sound, like \"make it brighter\" or \"add more reverb\". "
-                              "Type help for more.");
+                              "Type /help for commands.");
     startProbe();
     startTimerHz(20);
 }
@@ -139,7 +137,7 @@ void Session::saveSettings()
         s->setValue("llmServer", llmSettings_.server);
         if (modelChosen_)
             s->setValue("llmModel", llmSettings_.model);
-        s->setValue("llmMode", llmSettings_.mode);
+        s->removeValue("llmMode"); // from versions with built-in rules
         s->saveIfNeeded();
     }
 }
@@ -600,8 +598,8 @@ void Session::startPull(const juce::String& model)
         j->finished = true;
     });
     pullJob_ = std::move(job);
-    add(LogEntry::Kind::Info, "Downloading " + model + " through Ollama. You can keep working; the assistant uses the "
-                                                       "built-in rules until it's done.");
+    add(LogEntry::Kind::Info, "Downloading " + model + " through Ollama. You can keep working; the assistant can "
+                                                       "answer once it's done.");
 }
 
 void Session::finishPull()
@@ -629,19 +627,25 @@ juce::String Session::modelStatusText() const
     case ModelStatus::Missing:
         return llmSettings_.model + " not installed";
     case ModelStatus::Offline:
-        return "built-in rules";
-    case ModelStatus::Disabled:
-        return "built-in rules";
+        return "no model server";
     }
     return {};
 }
 
+juce::String Session::noModelText() const
+{
+    if (modelStatus_ == ModelStatus::Missing)
+        return probe_.ollama ? llmSettings_.model + " isn't installed. Type /download to get it (about 1.4 GB), or pick "
+                                                    "another with /model NAME."
+                             : "The model server doesn't have " + llmSettings_.model + ". Pick one it has with /model NAME.";
+    if (llm::installedApp().exists())
+        return "Ollama isn't running. Type /start to start it, then try again.";
+    return "The assistant needs a language model, and none is installed. Choose the AI assistant in the SynthMatch "
+           "installer, or install Ollama from ollama.com and type /download.";
+}
+
 void Session::startProbe()
 {
-    if (!llmSettings_.enabled()) {
-        modelStatus_ = ModelStatus::Disabled;
-        return;
-    }
     if (probeJob_)
         return;
     lastProbeMs_ = juce::Time::currentTimeMillis();
@@ -675,9 +679,7 @@ void Session::finishProbe()
         }
     }
 
-    if (!llmSettings_.enabled())
-        modelStatus_ = ModelStatus::Disabled;
-    else if (!probe_.reachable)
+    if (!probe_.reachable)
         modelStatus_ = ModelStatus::Offline;
     else if (!probe_.hasModel)
         modelStatus_ = ModelStatus::Missing;
@@ -732,68 +734,25 @@ void Session::submit(const juce::String& rawText)
         return;
     }
 
-    const auto current = processor_.currentParams();
-    auto reply = assist::interpret(text.toStdString(), current);
-
-    switch (reply.action) {
-    case assist::Reply::Action::Undo: {
-        const auto what = undo();
-        add(LogEntry::Kind::Reply, what.isEmpty() ? juce::String("Nothing to undo.") : "Undid " + what + ".", "rules");
+    // A bare "undo", "redo" or "help" is the command, not a request for the model.
+    const auto lower = text.toLowerCase();
+    if (lower == "undo" || lower == "redo" || lower == "help") {
+        runCommand(lower);
         return;
-    }
-    case assist::Reply::Action::Redo: {
-        const auto what = redo();
-        add(LogEntry::Kind::Reply, what.isEmpty() ? juce::String("Nothing to redo.") : "Redid " + what + ".", "rules");
-        return;
-    }
-    case assist::Reply::Action::Reset: {
-        synthmatch::Preset init;
-        applyPreset(init, "reset");
-        add(LogEntry::Kind::Reply, "Back to the initial preset. (Say undo to get the last one back.)", "rules");
-        return;
-    }
-    case assist::Reply::Action::Help:
-        add(LogEntry::Kind::Reply, fromStd(assist::helpText()) +
-                                       "\nCommands: /json (show the preset file)  /model NAME  /server URL  "
-                                       "/llm on|off  /status  /clear",
-            "rules");
-        return;
-    case assist::Reply::Action::Show:
-        add(LogEntry::Kind::Reply, fromStd(assist::describePreset(preset())), "rules");
-        return;
-    case assist::Reply::Action::Edit:
-    case assist::Reply::Action::None:
-        break;
     }
 
-    // Exact requests ("cutoff 2 kHz") need no interpreting, and requests made
-    // only of words the rules know are answered by them at once. Anything else
-    // goes to the language model when one is running, with the rules as a
-    // fallback. "/llm always" sends every request that isn't exact.
-    const bool modelReady = modelStatus_ == ModelStatus::Ready && llmSettings_.enabled();
-    const bool useModel = modelReady && !reply.exact && (llmSettings_.mode == "always" || !reply.complete);
-    if (!useModel) {
-        if (reply.action == assist::Reply::Action::None) {
-            add(LogEntry::Kind::Reply, fromStd(reply.text), "rules");
-        } else {
-            applyAndReport(reply.edits, fromStd(reply.text), "rules");
-        }
-        if (!reply.complete && llmSettings_.enabled() && modelStatus_ == ModelStatus::Offline && !toldAboutModel_) {
-            toldAboutModel_ = true;
-            add(LogEntry::Kind::Info, llm::installedApp().exists()
-                                          ? juce::String("That used the built-in rules: Ollama isn't running. Type /start to start it.")
-                                          : juce::String("That used the built-in rules: no local language model is installed. "
-                                                         "Choose the AI assistant in the SynthMatch installer, or install "
-                                                         "Ollama from ollama.com and type /download."));
-        }
+    // Everything else goes to the language model. While the first look for
+    // the server is still running, the request is sent anyway.
+    if (modelStatus_ == ModelStatus::Offline || modelStatus_ == ModelStatus::Missing) {
+        add(LogEntry::Kind::Error, noModelText());
         // Someone may have started the server since the last look.
-        if (modelStatus_ != ModelStatus::Ready && juce::Time::currentTimeMillis() - lastProbeMs_ > 10000)
+        if (juce::Time::currentTimeMillis() - lastProbeMs_ > 10000)
             startProbe();
         return;
     }
 
+    const auto current = processor_.currentParams();
     auto job = std::make_unique<LlmJob>();
-    job->fallback = std::move(reply);
     job->request = text.toStdString();
     auto* j = job.get();
     const auto settings = llmSettings_;
@@ -831,38 +790,21 @@ void Session::finishLlm()
     if (job->thread.joinable())
         job->thread.join();
 
-    const auto& fallback = job->fallback;
-    const auto useFallback = [&](const juce::String& why) {
-        if (fallback.action == assist::Reply::Action::Edit) {
-            add(LogEntry::Kind::Info, why + " Used the built-in rules instead.");
-            applyAndReport(fallback.edits, fromStd(fallback.text), "rules");
-        } else {
-            add(LogEntry::Kind::Error, why);
-            add(LogEntry::Kind::Reply, fromStd(fallback.text), "rules");
-        }
-    };
-
     if (!job->answer.ok) {
         // A connection problem: look again before the next request.
         modelStatus_ = ModelStatus::Offline;
         startProbe();
-        useFallback(job->answer.error + ".");
+        add(LogEntry::Kind::Error, job->answer.error + ".");
         return;
     }
 
     std::string error;
     auto parsed = assist::parseModelReply(job->answer.text.toStdString(), &error);
     if (!parsed) {
-        useFallback("The model's answer couldn't be used (" + fromStd(error) + ").");
+        add(LogEntry::Kind::Error, "The model's answer couldn't be used (" + fromStd(error) + "). Try saying it another way.");
         return;
     }
     assist::reinforceModelReply(job->request, *parsed);
-
-    auto p = preset();
-    if (assist::applyEdits(p.params, parsed->edits).empty() && fallback.action == assist::Reply::Action::Edit) {
-        useFallback("The model's answer didn't change anything.");
-        return;
-    }
     applyAndReport(parsed->edits, fromStd(parsed->text), llmSettings_.model);
 }
 
@@ -873,17 +815,24 @@ void Session::runCommand(const juce::String& command)
 
     if (name == "help" || name.isEmpty()) {
         add(LogEntry::Kind::Reply,
+            "Describe a change in your own words, like \"darker and a bit wider\", \"add a slow vibrato\" or \"set the "
+            "cutoff to 2 kHz\". The language model reads it and changes the settings.\n"
+            "/undo  /redo    take back the last change, or put it back\n"
+            "/reset          back to the initial preset\n"
+            "/show           describe the current sound\n"
             "/json           show the preset as it is saved (JSON you can also paste back in)\n"
             "/model NAME     use another local model, e.g. /model llama3.2:1b\n"
             "/server URL     where the model server is (default http://127.0.0.1:11434)\n"
-            "/llm auto       ask the model when the built-in rules don't know every word (default)\n"
-            "/llm always     ask the model for everything except exact settings\n"
-            "/llm off        built-in rules only\n"
             "/download       download the model through Ollama (default qwen3:1.7b)\n"
             "/start          start Ollama if it's installed but not running\n"
             "/status         what the assistant is using\n"
-            "/undo  /redo  /clear",
-            "rules");
+            "/clear          empty this log");
+    } else if (name == "reset") {
+        synthmatch::Preset init;
+        applyPreset(init, "reset");
+        add(LogEntry::Kind::Reply, "Back to the initial preset. (/undo gets the last one back.)");
+    } else if (name == "show") {
+        add(LogEntry::Kind::Reply, fromStd(assist::describePreset(preset())));
     } else if (name == "json") {
         const auto root = synthmatch::presetToJsonValue(preset());
         juce::String out = "{ \"name\": \"" + presetName_ + "\", \"nodes\": {\n";
@@ -895,8 +844,7 @@ void Session::runCommand(const juce::String& command)
     } else if (name == "model") {
         if (argument.isEmpty()) {
             add(LogEntry::Kind::Reply, "Model: " + llmSettings_.model +
-                                           (probe_.models.empty() ? juce::String() : "\nInstalled: " + probe_.names().joinIntoString(", ")),
-                "rules");
+                                           (probe_.models.empty() ? juce::String() : "\nInstalled: " + probe_.names().joinIntoString(", ")));
             return;
         }
         llmSettings_.model = argument;
@@ -923,7 +871,7 @@ void Session::runCommand(const juce::String& command)
         }
     } else if (name == "server") {
         if (argument.isEmpty()) {
-            add(LogEntry::Kind::Reply, "Server: " + llmSettings_.server, "rules");
+            add(LogEntry::Kind::Reply, "Server: " + llmSettings_.server);
             return;
         }
         llmSettings_.server = argument;
@@ -931,31 +879,17 @@ void Session::runCommand(const juce::String& command)
         add(LogEntry::Kind::Info, "Model server set to " + argument + ".");
         modelStatus_ = ModelStatus::Checking;
         startProbe();
-    } else if (name == "llm") {
-        const auto mode = argument.toLowerCase();
-        llmSettings_.mode = mode == "off" || mode == "0" || mode == "false" ? "off" : (mode == "always" ? "always" : "auto");
-        saveSettings();
-        add(LogEntry::Kind::Info, llmSettings_.mode == "off"      ? juce::String("Language model off: built-in rules only.")
-                                  : llmSettings_.mode == "always" ? juce::String("The language model now answers every request that isn't an exact setting.")
-                                                                  : juce::String("The language model answers what the built-in rules can't."));
-        if (llmSettings_.enabled()) {
-            modelStatus_ = ModelStatus::Checking;
-            startProbe();
-        } else {
-            modelStatus_ = ModelStatus::Disabled;
-        }
     } else if (name == "status") {
-        juce::String s = "Assistant: " + modelStatusText() + " (mode: " + llmSettings_.mode + ")\nServer: " + llmSettings_.server +
-                         "\nModel: " + llmSettings_.model;
+        juce::String s = "Assistant: " + modelStatusText() + "\nServer: " + llmSettings_.server + "\nModel: " + llmSettings_.model;
         if (probe_.reachable)
             s += "\nInstalled models: " + (probe_.models.empty() ? juce::String("(not listed)") : probe_.names().joinIntoString(", "));
         else if (probe_.error.isNotEmpty())
             s += "\n" + probe_.error;
         s += juce::String("\nMatching encoder: ") + (hasEncoder() ? "built in" : "not available (matching still works)");
-        add(LogEntry::Kind::Reply, s, "rules");
+        add(LogEntry::Kind::Reply, s);
     } else if (name == "undo" || name == "redo") {
         const auto what = name == "undo" ? undo() : redo();
-        add(LogEntry::Kind::Reply, what.isEmpty() ? "Nothing to " + name + "." : (name == "undo" ? "Undid " : "Redid ") + what + ".", "rules");
+        add(LogEntry::Kind::Reply, what.isEmpty() ? "Nothing to " + name + "." : (name == "undo" ? "Undid " : "Redid ") + what + ".");
     } else if (name == "clear") {
         log_.clear();
         sendChangeMessage();

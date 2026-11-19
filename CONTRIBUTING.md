@@ -41,8 +41,8 @@ engine/     the synth: oscillators, filter, envelopes, LFOs, unison, EQ, delay,
             reverb, match EQ; presets (JSON); WAV files. Plain C++20, no JUCE.
 match/      matching: note detection, spectrograms, the CMA-ES search, the EQ
             match, the encoder network and its trainer. Plain C++20.
-assist/     the assistant: built-in rules, the edit format, and the language
-            model's prompt and answer handling. Plain C++20.
+assist/     the assistant: the edit format, and the language model's prompt
+            and answer handling. Plain C++20.
 plugin/     the JUCE plugin (VST3, Standalone, AU on macOS): the interface, and
             Session, which runs matching and the assistant in the background.
 tools/      command-line tools (below)
@@ -61,11 +61,18 @@ On Windows they're in `build/tools/<name>/Release/`, elsewhere in
 build/tools/match/Release/synthmatch_match reference.wav --out matched.json --render matched.wav
 ```
 
-Edit a preset in words, or render one:
+See exactly what the assistant's language model is sent for a request, or apply
+an answer it gave (edits in its JSON format, from a file) to a preset:
 
 ```bash
-build/tools/edit/Release/synthmatch_edit matched.json "darker and add some delay"
+build/tools/edit/Release/synthmatch_edit matched.json --prompt "darker and add some delay"
 ```
+
+```bash
+build/tools/edit/Release/synthmatch_edit matched.json answer.json
+```
+
+Render a preset:
 
 ```bash
 build/tools/render/Release/synthmatch_render --preset matched.json --note 57 --out a3.wav

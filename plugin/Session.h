@@ -102,14 +102,14 @@ public:
         enum class Kind { User, Reply, Change, Info, Error };
         Kind kind = Kind::Info;
         juce::String text;
-        juce::String tag; // who answered: "rules" or the model's name
+        juce::String tag; // who answered: the model's name, or "json"
     };
     const std::vector<LogEntry>& log() const { return log_; }
     void submit(const juce::String& text);
     bool assistantBusy() const { return llmJob_ != nullptr || pullJob_ != nullptr; }
     juce::String busyText() const; // what the assistant is doing, for the terminal
 
-    enum class ModelStatus { Checking, Ready, Missing, Offline, Disabled };
+    enum class ModelStatus { Checking, Ready, Missing, Offline };
     ModelStatus modelStatus() const { return modelStatus_; }
     juce::String modelStatusText() const;
     const llm::Settings& llmSettings() const { return llmSettings_; }
@@ -142,6 +142,7 @@ private:
     void applyAndReport(const std::vector<synthmatch::assist::Edit>& edits, const juce::String& said,
                         const juce::String& tag);
     void runCommand(const juce::String& command);
+    juce::String noModelText() const; // why a request can't be answered, and what to do
     void add(LogEntry::Kind kind, const juce::String& text, const juce::String& tag = {});
     void saveSettings();
 

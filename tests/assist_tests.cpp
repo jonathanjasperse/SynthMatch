@@ -1,13 +1,10 @@
-// Tests for the assistant: the built-in rules, the edit format, and the
-// language-model prompt and answer handling. Plain asserts; run through CTest.
+// Tests for the assistant: the edit format, and the language-model prompt and
+// answer handling. Plain asserts; run through CTest.
 
 #include "synthmatch/Preset.h"
 #include "synthmatch/assist/Assistant.h"
 #include "synthmatch/assist/Edits.h"
-#include "synthmatch/dsp/Filter.h"
 #include "synthmatch/dsp/Lfo.h"
-#include "synthmatch/dsp/Oscillator.h"
-#include "synthmatch/dsp/Reverb.h"
 
 #include <algorithm>
 #include <cmath>
@@ -55,22 +52,6 @@ ParamValues midPatch()
     p[param::AmpAttackMs] = 30.0f;
     p[param::AmpReleaseMs] = 400.0f;
     return p;
-}
-
-// Applies a request and returns the new parameters.
-ParamValues after(const std::string& request, const ParamValues& start, Reply* replyOut = nullptr)
-{
-    const Reply reply = interpret(request, start);
-    if (replyOut)
-        *replyOut = reply;
-    ParamValues p = start;
-    applyEdits(p, reply.edits);
-    return p;
-}
-
-bool understood(const std::string& request, const ParamValues& start)
-{
-    return interpret(request, start).action != Reply::Action::None;
 }
 
 float v(const ParamValues& p, int index) { return p[static_cast<std::size_t>(index)]; }
@@ -127,249 +108,6 @@ void testEdits()
     CHECK(json.dump(0).find("\"value\":\"on\"") != std::string::npos);
 }
 
-void testRulesVocabulary()
-{
-    const auto p = midPatch();
-
-    // Brightness.
-    CHECK(v(after("make it brighter", p), param::FilterCutoffHz) > 1500.0f);
-    CHECK(v(after("darker please", p), param::FilterCutoffHz) < 1500.0f);
-    CHECK(v(after("less bright", p), param::FilterCutoffHz) < 1500.0f);
-    CHECK(v(after("it's too bright", p), param::FilterCutoffHz) < 1500.0f);
-    // "a bit" moves less than "much".
-    const float bit = v(after("a bit brighter", p), param::FilterCutoffHz);
-    const float lot = v(after("much brighter", p), param::FilterCutoffHz);
-    CHECK(bit > 1500.0f && lot > bit);
-
-    // With the filter already wide open, brightness comes from the EQ.
-    const auto open = after("brighter", defaultValues());
-    CHECK(v(open, param::EqOn) == 1.0f);
-    CHECK(v(open, param::EqHighGainDb) > 0.0f);
-
-    // Reverb. Adding it, or more of it, is clearly audible.
-    auto dry = defaultValues();
-    dry[param::ReverbOn] = 0.0f;
-    dry[param::ReverbMix] = 0.1f;
-    const auto wet = after("add more reverb", dry);
-    CHECK(v(wet, param::ReverbOn) == 1.0f);
-    CHECK(v(wet, param::ReverbMix) >= 0.25f && v(wet, param::ReverbMix) <= 0.3f);
-    // Each "more" is 6 dB more reverb against the dry sound: from the default
-    // touch (15%) to 30%, then 58%. After that the dry sound would start to
-    // fade, so the mix stops at 70% and the tail grows longer and bigger.
-    const auto reverbDb = [](const ParamValues& q) {
-        const double mix = v(q, param::ReverbMix);
-        return 20.0 * std::log10(std::min(1.0, 2.0 * mix) / std::min(1.0, 2.0 * (1.0 - mix)));
-    };
-    auto touch = defaultValues();
-    touch[param::ReverbOn] = 1.0f;
-    touch[param::ReverbMix] = 0.15f; // set here: the default may change
-    const auto more1 = after("more reverb", touch);
-    const auto more2 = after("more reverb", more1);
-    const auto more3 = after("more reverb", more2);
-    CHECK_NEAR(v(more1, param::ReverbMix), 0.30, 0.005);
-    CHECK_NEAR(v(more2, param::ReverbMix), 0.58, 0.005);
-    CHECK_NEAR(reverbDb(more1) - reverbDb(touch), 6.0, 0.1);
-    CHECK_NEAR(reverbDb(more2) - reverbDb(more1), 6.0, 0.1);
-    CHECK_NEAR(v(more3, param::ReverbMix), 0.7, 1e-6);
-    CHECK(v(more3, param::ReverbDecaySec) > v(more2, param::ReverbDecaySec));
-    CHECK(v(more3, param::ReverbSize) > v(more2, param::ReverbSize));
-    CHECK_NEAR(v(after("a lot more reverb", p), param::ReverbMix), 0.7, 1e-6);
-    // "Less" takes the same step back, and "drier" too.
-    CHECK_NEAR(v(after("less reverb", p), param::ReverbMix), 0.15, 0.005);
-    CHECK_NEAR(v(after("make it drier", p), param::ReverbMix), 0.15, 0.005);
-    CHECK(v(after("a bit less reverb", p), param::ReverbMix) > v(after("less reverb", p), param::ReverbMix));
-    CHECK(v(after("turn off the reverb", p), param::ReverbOn) == 0.0f);
-    // Less of a reverb that's off changes nothing.
-    CHECK(v(after("less reverb", dry), param::ReverbMix) == v(dry, param::ReverbMix));
-    CHECK(v(after("less reverb", dry), param::ReverbOn) == 0.0f);
-    const auto cathedral = after("make it sound like a cathedral", p);
-    CHECK(v(cathedral, param::ReverbDecaySec) > v(p, param::ReverbDecaySec));
-    CHECK(v(cathedral, param::ReverbSize) > v(p, param::ReverbSize));
-    // More of a reverb that's on also lengthens its tail, by how much was asked for.
-    const float tail = v(p, param::ReverbDecaySec);
-    CHECK_NEAR(v(after("more reverb", p), param::ReverbDecaySec), tail * 1.15f, 1e-3);
-    CHECK_NEAR(v(after("a bit more reverb", p), param::ReverbDecaySec), tail * 1.075f, 1e-3);
-    CHECK(v(after("a lot more reverb", p), param::ReverbDecaySec) > v(after("more reverb", p), param::ReverbDecaySec));
-    CHECK(v(after("make it wetter", p), param::ReverbDecaySec) > tail);
-    // Adding reverb that was off starts from its usual tail; less reverb leaves the tail.
-    CHECK(v(wet, param::ReverbDecaySec) == v(dry, param::ReverbDecaySec));
-    CHECK(v(after("less reverb", p), param::ReverbDecaySec) == tail);
-
-    // Reverb modes and tone. With the reverb named, sound words shape the
-    // reverb and leave the synth alone.
-    const auto plate = after("plate reverb", p);
-    CHECK(v(plate, param::ReverbMode) == static_cast<float>(dsp::ReverbMode::Plate));
-    CHECK(v(after("give it a small room reverb", p), param::ReverbMode) == static_cast<float>(dsp::ReverbMode::Room));
-    CHECK(v(after("chamber", p), param::ReverbMode) == static_cast<float>(dsp::ReverbMode::Chamber));
-    const auto darkVerb = after("darker reverb", p);
-    CHECK(v(darkVerb, param::FilterCutoffHz) == 1500.0f);
-    CHECK(v(darkVerb, param::ReverbHighCutHz) < 20000.0f);
-    CHECK(v(darkVerb, param::ReverbDamping) > v(p, param::ReverbDamping));
-    CHECK(v(after("make the reverb darker", p), param::ReverbHighCutHz) < 20000.0f);
-    CHECK(v(after("make the reverb darker", p), param::FilterCutoffHz) == 1500.0f);
-    CHECK(v(after("brighter reverb", darkVerb), param::ReverbHighCutHz) > v(darkVerb, param::ReverbHighCutHz));
-    const auto vintage = after("shimmer-free vintage hall", p);
-    CHECK(v(vintage, param::ReverbMode) == static_cast<float>(dsp::ReverbMode::Vintage));
-    CHECK(v(vintage, param::ReverbSize) >= 0.6f && v(vintage, param::ReverbDecaySec) >= 2.5f);
-    CHECK(v(vintage, param::ReverbHighCutHz) <= 9000.0f);
-    CHECK(v(vintage, param::EqHighGainDb) == v(p, param::EqHighGainDb));
-    CHECK(v(vintage, param::EqOn) == v(p, param::EqOn));
-    CHECK(v(vintage, param::FilterCutoffHz) == 1500.0f);
-    CHECK(v(vintage, param::ReverbMix) == v(p, param::ReverbMix));
-    const auto lush = after("lush reverb", p);
-    CHECK(v(lush, param::ReverbModDepth) > v(p, param::ReverbModDepth));
-    CHECK(v(lush, param::UnisonVoices) == v(p, param::UnisonVoices));
-    CHECK(v(after("lush", p), param::UnisonVoices) > 1.0f); // without the reverb, it's the synth
-    const auto steady = after("reverb with no chorus", p);
-    CHECK(v(steady, param::ReverbModDepth) < v(p, param::ReverbModDepth));
-    CHECK(v(steady, param::ReverbOn) == 1.0f);
-    CHECK(v(after("less muddy reverb", p), param::ReverbLowCutHz) >= 200.0f);
-    CHECK(v(after("smoother reverb", p), param::ReverbDiffusion) > v(p, param::ReverbDiffusion));
-    CHECK(v(after("mono reverb", p), param::ReverbWidth) == 0.0f);
-    auto room = p;
-    room[param::ReverbMode] = static_cast<float>(dsp::ReverbMode::Room);
-    const auto huge = after("huge reverb", room);
-    CHECK(v(huge, param::ReverbMode) == static_cast<float>(dsp::ReverbMode::Hall));
-    CHECK(v(huge, param::ReverbSize) > v(p, param::ReverbSize));
-    CHECK(v(huge, param::ReverbMix) > v(p, param::ReverbMix));
-    // There's no shimmer reverb: the reply says so, and the EQ is left alone.
-    Reply shimmerReply;
-    const auto shimmer = after("shimmer reverb", p, &shimmerReply);
-    CHECK(shimmerReply.text.find("shimmer") != std::string::npos);
-    CHECK(v(shimmer, param::EqOn) == v(p, param::EqOn));
-    CHECK(v(shimmer, param::ReverbMode) == static_cast<float>(dsp::ReverbMode::Plate));
-    // Shaping a reverb that's off brings it in, at a level you can hear.
-    const auto platedIn = after("plate reverb", dry);
-    CHECK(v(platedIn, param::ReverbOn) == 1.0f && v(platedIn, param::ReverbMix) >= 0.25f);
-    CHECK(v(after("turn off the plate reverb", p), param::ReverbOn) == 0.0f);
-    // A bare word right after a reverb request is about the reverb too.
-    const auto darkLush = after("make the reverb darker and lusher", p);
-    CHECK(v(darkLush, param::ReverbModDepth) > v(p, param::ReverbModDepth));
-    CHECK(v(darkLush, param::UnisonVoices) == v(p, param::UnisonVoices));
-    CHECK(v(after("plate reverb and make it brighter", p), param::FilterCutoffHz) > 1500.0f);
-    CHECK(interpret("darker plate reverb", p).complete);
-    CHECK(interpret("shimmer-free vintage hall", p).complete);
-
-    // Other effects and character.
-    const auto delayed = after("add some delay", dry);
-    CHECK(v(delayed, param::DelayOn) == 1.0f && v(delayed, param::DelayMix) > 0.0f);
-    CHECK(v(after("ping pong delay", dry), param::DelayMode) == 1.0f);
-    CHECK(v(after("wider", p), param::UnisonVoices) > 1.0f);
-    CHECK(v(after("fatter and more detuned", p), param::UnisonDetune) > v(p, param::UnisonDetune));
-    CHECK(v(after("punchier", p), param::AmpAttackMs) < 30.0f);
-    CHECK(v(after("softer attack", p), param::AmpAttackMs) > 30.0f);
-    CHECK(v(after("more resonance", p), param::FilterResonance) > 0.3f);
-    CHECK(v(after("warmer", p), param::FilterCutoffHz) < 1500.0f);
-    CHECK(v(after("louder", p), param::GainDb) > v(p, param::GainDb));
-    CHECK(v(after("a bit quieter", p), param::GainDb) < v(p, param::GainDb));
-    CHECK(v(after("longer release", p), param::AmpReleaseMs) > 400.0f);
-    CHECK(v(after("shorter notes", p), param::AmpReleaseMs) < 400.0f);
-
-    const auto pluck = after("make it plucky", p);
-    CHECK(v(pluck, param::AmpSustain) == 0.0f && v(pluck, param::FilterEnvAmount) > 0.0f);
-    const auto pad = after("turn it into a pad", p);
-    CHECK(v(pad, param::AmpAttackMs) > 100.0f && v(pad, param::AmpReleaseMs) > 1000.0f);
-
-    const auto vibrato = after("add vibrato", p);
-    CHECK(v(vibrato, param::Lfo1Target) == static_cast<float>(dsp::LfoTarget::Pitch));
-    CHECK(v(vibrato, param::Lfo1Depth) > 0.0f);
-    CHECK(v(after("faster vibrato", vibrato), param::Lfo1RateHz) > v(vibrato, param::Lfo1RateHz));
-    // A slow square pitch LFO isn't a vibrato: asking for vibrato replaces it with one.
-    {
-        auto trick = p;
-        trick[param::Lfo1Target] = static_cast<float>(dsp::LfoTarget::Pitch);
-        trick[param::Lfo1Wave] = static_cast<float>(dsp::LfoWave::Square);
-        trick[param::Lfo1RateHz] = 0.8f;
-        trick[param::Lfo1Depth] = 0.4f;
-        const auto fixed = after("add some vibrato", trick);
-        CHECK(v(fixed, param::Lfo1Wave) == static_cast<float>(dsp::LfoWave::Sine));
-        CHECK_NEAR(v(fixed, param::Lfo1RateHz), 5.5, 1e-6);
-        CHECK_NEAR(v(fixed, param::Lfo1Depth), 0.12, 1e-6);
-    }
-    CHECK(v(after("add a wobble", p), param::Lfo1Target) == static_cast<float>(dsp::LfoTarget::Cutoff));
-    CHECK(v(after("a slow wobble", p), param::Lfo1RateHz) < v(after("add a wobble", p), param::Lfo1RateHz));
-    CHECK(v(after("fast vibrato", p), param::Lfo1RateHz) > v(after("add vibrato", p), param::Lfo1RateHz));
-
-    const auto sub = after("add a sub", p);
-    CHECK(v(sub, param::Osc3Level) > 0.0f && v(sub, param::Osc3Coarse) == -12.0f);
-    const auto down = after("octave down", p);
-    CHECK(v(down, param::Osc1Coarse) == -12.0f && v(down, param::Osc2Coarse) == -12.0f);
-
-    // Several requests at once.
-    const auto both = after("brighter and add some delay, then a little more resonance", p);
-    CHECK(v(both, param::FilterCutoffHz) > 1500.0f);
-    CHECK(v(both, param::DelayOn) == 1.0f);
-    CHECK(v(both, param::FilterResonance) > 0.3f);
-
-    // Vague words aren't "exact" (a language model may do better with them).
-    Reply reply;
-    after("make it brighter", p, &reply);
-    CHECK(!reply.exact);
-    CHECK(!reply.text.empty());
-
-    CHECK(!understood("purple monkey dishwasher", p));
-
-    // Several sound words in one clause all count.
-    const auto warmPad = after("a warm analog pad", p);
-    CHECK(v(warmPad, param::FilterCutoffHz) < 1500.0f);
-    CHECK(v(warmPad, param::AmpAttackMs) > 100.0f);
-    CHECK(v(after("too boomy", p), param::EqLowGainDb) < 0.0f);
-
-    // Whether the rules understood every word (if not, a language model gets a go).
-    CHECK(interpret("make it a bit brighter please", p).complete);
-    CHECK(interpret("cutoff 2 kHz", p).complete);
-    CHECK(interpret("warm analog pad", p).complete);
-    CHECK(!interpret("brighter like a cheap 80s organ", p).complete);
-    CHECK(!interpret("it should feel underwater", p).complete);
-}
-
-void testRulesExact()
-{
-    const auto p = midPatch();
-    Reply reply;
-
-    CHECK(v(after("set the cutoff to 2 kHz", p, &reply), param::FilterCutoffHz) == 2000.0f);
-    CHECK(reply.exact);
-    CHECK(v(after("cutoff 800", p), param::FilterCutoffHz) == 800.0f);
-    CHECK(v(after("attack 20 ms", p), param::AmpAttackMs) == 20.0f);
-    CHECK(v(after("release 1.5 s", p), param::AmpReleaseMs) == 1500.0f);
-    CHECK(v(after("filter attack 5ms", p), param::FilterAttackMs) == 5.0f);
-    CHECK_NEAR(v(after("reverb mix 40%", p), param::ReverbMix), 0.4, 1e-6);
-    CHECK_NEAR(v(after("reverb mix 40", p), param::ReverbMix), 0.4, 1e-6);
-    CHECK(v(after("unison 5 voices", p), param::UnisonVoices) == 5.0f);
-    CHECK(v(after("gain -6 db", p), param::GainDb) == -6.0f);
-    CHECK(v(after("osc 2 coarse 7", p), param::Osc2Coarse) == 7.0f);
-    CHECK(v(after("raise the cutoff by 500 hz", p), param::FilterCutoffHz) == 2000.0f);
-    CHECK(v(after("lower the gain by 3 db", p), param::GainDb) == v(p, param::GainDb) - 3.0f);
-    CHECK(v(after("resonance max", p), param::FilterResonance) == 1.0f);
-    CHECK(v(after("double the release", p), param::AmpReleaseMs) == 800.0f);
-
-    // Setting a parameter of an effect that is off switches the effect on.
-    const auto d = after("delay time 250 ms", defaultValues());
-    CHECK(v(d, param::DelayTimeMs) == 250.0f && v(d, param::DelayOn) == 1.0f);
-
-    // Named choices.
-    CHECK(v(after("high pass filter", p), param::FilterType) == static_cast<float>(dsp::FilterType::HighPass));
-    CHECK(v(after("osc 1 square", p), param::Osc1Wave) == static_cast<float>(dsp::Wave::Square));
-    const auto osc2 = after("osc2 triangle", p);
-    CHECK(v(osc2, param::Osc2Wave) == static_cast<float>(dsp::Wave::Triangle));
-    CHECK(v(osc2, param::Osc2Level) > 0.0f); // a silent oscillator is brought in
-    CHECK(v(after("sine wave", p), param::Osc1Wave) == static_cast<float>(dsp::Wave::Sine));
-    CHECK(v(after("delay sync 1/8", p), param::DelaySync) == 3.0f);
-    CHECK(v(after("lfo 1 target cutoff", p), param::Lfo1Target) == static_cast<float>(dsp::LfoTarget::Cutoff));
-    CHECK(v(after("lfo1 wave random", p), param::Lfo1Wave) == static_cast<float>(dsp::LfoWave::Random));
-    CHECK(v(after("enable the eq", p), param::EqOn) == 1.0f);
-    CHECK(v(after("no delay", after("add delay", p)), param::DelayOn) == 0.0f);
-
-    // Commands.
-    CHECK(interpret("undo", p).action == Reply::Action::Undo);
-    CHECK(interpret("redo", p).action == Reply::Action::Redo);
-    CHECK(interpret("start over", p).action == Reply::Action::Reset);
-    CHECK(interpret("help", p).action == Reply::Action::Help);
-    CHECK(interpret("show the current settings", p).action == Reply::Action::Show);
-    CHECK(interpret("undo", p).exact);
-}
-
 void testDescribe()
 {
     Preset preset;
@@ -382,7 +120,6 @@ void testDescribe()
     CHECK(text.find("1.5 kHz") != std::string::npos);
     CHECK(text.find("reverb hall") != std::string::npos);
     CHECK(text.find("-12 st") != std::string::npos);
-    CHECK(!helpText().empty());
 }
 
 void testModelPrompt()
@@ -479,8 +216,6 @@ void testModelReply()
 int main()
 {
     testEdits();
-    testRulesVocabulary();
-    testRulesExact();
     testDescribe();
     testModelPrompt();
     testModelReply();

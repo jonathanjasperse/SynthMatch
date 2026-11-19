@@ -25,10 +25,6 @@ namespace llm {
 struct Settings {
     juce::String server = "http://127.0.0.1:11434";
     juce::String model = "qwen3:1.7b";
-    // When to ask the model: "auto" for requests the built-in rules don't fully
-    // understand, "always" for every request that isn't an exact setting, "off".
-    juce::String mode = "auto";
-    bool enabled() const { return mode != "off"; }
 };
 
 struct ModelInfo {

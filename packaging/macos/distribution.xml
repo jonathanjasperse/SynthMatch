@@ -27,7 +27,7 @@
         <pkg-ref id="com.bedrotaudio.synthmatch.app"/>
     </choice>
     <choice id="assistant" title="AI assistant (Ollama and qwen3:1.7b)"
-            description="Downloads Ollama from ollama.com (if it isn't installed) and a 1.4 GB language model, so the assistant terminal understands any request. Optional: without it the assistant uses its built-in rules.">
+            description="Downloads Ollama from ollama.com (if it isn't installed) and a 1.4 GB language model, for the assistant terminal. Optional: without it the assistant can't answer, but matching and editing work as usual.">
         <pkg-ref id="com.bedrotaudio.synthmatch.assistant"/>
     </choice>
 

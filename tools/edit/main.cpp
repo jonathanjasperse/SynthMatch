@@ -1,12 +1,17 @@
-// synthmatch_edit: change a preset file by describing the change in words.
+// synthmatch_edit: change a preset file with edits in the assistant's JSON
+// format (what the language model writes), or see what the model is sent.
 //
-//   synthmatch_edit pad.json "make it brighter and add some reverb"
-//   synthmatch_edit pad.json --prompt "warmer"     (print what a language model would be sent)
+//   synthmatch_edit pad.json '{"edits":[{"param":"filter_cutoff_hz","op":"nudge","value":0.15}]}'
+//   synthmatch_edit pad.json answer.txt            (the edits from a file)
+//   synthmatch_edit pad.json --prompt "warmer"     (print what the language model would be sent)
+//   synthmatch_edit pad.json --show                (describe the preset)
 
 #include "synthmatch/Preset.h"
 #include "synthmatch/assist/Assistant.h"
 
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <string_view>
 
@@ -15,14 +20,19 @@ namespace {
 void printUsage()
 {
     std::puts(
-        "usage: synthmatch_edit PRESET.json \"REQUEST\" [options]\n"
+        "usage: synthmatch_edit PRESET.json EDITS [options]\n"
+        "       synthmatch_edit PRESET.json --prompt \"REQUEST\"\n"
         "\n"
-        "Applies a request such as \"make it brighter\" to a preset file, using the\n"
-        "built-in rules (the plugin can also use a local language model).\n"
+        "Applies EDITS to a preset file. EDITS is JSON in the form the assistant's\n"
+        "language model answers with, or a file holding it, e.g.\n"
+        "  {\"edits\":[{\"param\":\"filter_cutoff_hz\",\"op\":\"nudge\",\"value\":0.15}]}\n"
+        "(text around the JSON is ignored, so a model's whole answer works too).\n"
         "\n"
         "  --out PATH    write the result here instead of over PRESET.json\n"
         "  --dry-run     show the changes without writing anything\n"
-        "  --prompt      print the prompt a language model would be given, and exit\n"
+        "  --show        describe the preset, and exit\n"
+        "  --prompt      print the prompt the language model would be given for\n"
+        "                REQUEST, and exit\n"
         "  --schema      print the JSON Schema its answer must follow, and exit\n"
         "  --help        show this message");
 }
@@ -37,8 +47,8 @@ int fail(const std::string& message)
 
 int main(int argc, char** argv)
 {
-    std::string presetPath, request, outPath;
-    bool dryRun = false, prompt = false, schema = false;
+    std::string presetPath, input, outPath;
+    bool dryRun = false, prompt = false, schema = false, show = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
@@ -52,6 +62,8 @@ int main(int argc, char** argv)
             prompt = true;
         } else if (arg == "--schema") {
             schema = true;
+        } else if (arg == "--show") {
+            show = true;
         } else if (arg == "--out") {
             if (++i >= argc)
                 return fail("--out needs a path");
@@ -59,14 +71,14 @@ int main(int argc, char** argv)
         } else if (presetPath.empty()) {
             presetPath = arg;
         } else {
-            request += (request.empty() ? "" : " ") + std::string(arg);
+            input += (input.empty() ? "" : " ") + std::string(arg);
         }
     }
     if (schema) {
         std::puts(synthmatch::assist::modelReplySchema().dump(2).c_str());
         return 0;
     }
-    if (presetPath.empty() || request.empty()) {
+    if (presetPath.empty() || (input.empty() && !show)) {
         printUsage();
         return 2;
     }
@@ -79,42 +91,34 @@ int main(int argc, char** argv)
     for (const auto& w : warnings)
         std::fprintf(stderr, "warning: %s\n", w.c_str());
 
-    if (prompt) {
-        std::printf("--- system ---\n%s\n--- user ---\n%s\n", synthmatch::assist::modelSystemPrompt().c_str(),
-                    synthmatch::assist::modelUserPrompt(request, preset->params).c_str());
-        return 0;
-    }
-
-    using synthmatch::assist::Reply;
-    const Reply reply = synthmatch::assist::interpret(request, preset->params);
-    switch (reply.action) {
-    case Reply::Action::Help:
-        std::puts(synthmatch::assist::helpText().c_str());
-        return 0;
-    case Reply::Action::Show:
+    if (show) {
         std::puts(synthmatch::assist::describePreset(*preset).c_str());
         return 0;
-    case Reply::Action::Edit:
-        break;
-    case Reply::Action::Reset:
-        preset->params = synthmatch::defaultValues();
-        preset->matchEq.fill(0.0f);
-        std::puts("Reset to the initial preset.");
-        break;
-    default:
-        return fail(reply.text.empty() ? "that only works in the plugin" : reply.text);
+    }
+    if (prompt) {
+        std::printf("--- system ---\n%s\n--- user ---\n%s\n", synthmatch::assist::modelSystemPrompt().c_str(),
+                    synthmatch::assist::modelUserPrompt(input, preset->params).c_str());
+        return 0;
     }
 
-    if (reply.action == Reply::Action::Edit) {
-        const auto changes = synthmatch::assist::applyEdits(preset->params, reply.edits);
-        if (!reply.text.empty())
-            std::puts(reply.text.c_str());
-        if (changes.empty()) {
-            std::puts("Nothing changed (already at the limit).");
-            return 0;
-        }
-        std::puts(synthmatch::assist::describeChanges(changes).c_str());
+    // EDITS may also name a file holding them.
+    if (input.find('{') == std::string::npos) {
+        std::ifstream file(input, std::ios::binary);
+        if (!file)
+            return fail("EDITS is neither JSON nor a file that can be read: " + input);
+        input.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
     }
+    const auto reply = synthmatch::assist::parseModelReply(input, &error);
+    if (!reply)
+        return fail(error);
+    const auto changes = synthmatch::assist::applyEdits(preset->params, reply->edits);
+    if (!reply->text.empty())
+        std::puts(reply->text.c_str());
+    if (changes.empty()) {
+        std::puts("Nothing changed (already at the limit).");
+        return 0;
+    }
+    std::puts(synthmatch::assist::describeChanges(changes).c_str());
 
     if (dryRun)
         return 0;

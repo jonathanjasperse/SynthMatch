@@ -1,5 +1,5 @@
 # The assistant: turns typed requests ("make it brighter") into preset edits,
-# with built-in rules and the prompt/answer format for a small language model.
+# using the prompt and answer format for a small language model.
 # Plain C++ like the engine: no JUCE.
 add_library(synthmatch_assist STATIC
     src/Assistant.cpp

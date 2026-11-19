@@ -2,10 +2,10 @@
 
 // Edits: the small vocabulary the assistant uses to change a preset.
 //
-// Whether a request is understood by the built-in rules or by a language
-// model, the result is the same thing: a short list of edits, each of which
-// moves one parameter. That keeps the model's job small (pick a parameter and
-// a direction) and means every change can be checked, described and undone.
+// A language model's answer, or JSON pasted into the terminal, becomes the
+// same thing: a short list of edits, each of which moves one parameter. That
+// keeps the model's job small (pick a parameter and a direction) and means
+// every change can be checked, described and undone.
 //
 // As JSON, which is what a language model is asked to write:
 //

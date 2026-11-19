@@ -17,9 +17,8 @@ plugins in your DAW and it shows up as an instrument.
 
 The installer can also set up the AI assistant. That part downloads Ollama and a
 small language model (about 2.5 GB) from their official sites, and it all runs on
-your own computer. You can skip it. The assistant still gets plain requests like
-"brighter" or "cutoff 2 kHz" without it, and you can type `/download` later to
-get the model.
+your own computer. You can skip it. Matching and the node editor work fine without
+it, the assistant just won't answer until you type `/download` to get the model.
 
 The installers aren't code-signed yet, so you'll get a warning the first time. On
 Windows click More info, then Run anyway. On Mac go to System Settings > Privacy &
@@ -49,8 +48,8 @@ plate and vintage modes. There's always a bit of reverb on to start with.
 
 The terminal along the bottom is the assistant. Type what you want in normal
 words, like "darker and a bit wider", "more reverb" or "it should feel
-underwater". It shows exactly what it changed, and `undo` (or Ctrl+Z, Cmd+Z on
-Mac) takes it back. Type `help` for examples and `/help` for commands.
+underwater". The language model reads it and shows exactly what it changed, and
+`undo` (or Ctrl+Z, Cmd+Z on Mac) takes it back. Type `/help` for commands.
 
 Presets are plain JSON files. Open and save them with the buttons at the top.
 
